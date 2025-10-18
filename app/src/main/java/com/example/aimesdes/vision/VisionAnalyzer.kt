@@ -2,22 +2,21 @@ package com.example.aimesdes.vision
 
 import android.content.Context
 import android.graphics.RectF
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.support.common.FileUtil
-import org.tensorflow.lite.support.image.TensorImage
-import org.tensorflow.lite.DataType
-import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
 import java.nio.ByteBuffer
-import kotlin.math.max
-import kotlin.math.min
+import java.nio.ByteOrder
+import kotlin.system.measureTimeMillis
 
 data class DetectedObject(
     val label: String,
     val score: Float,
-    val box: RectF
+    val box: RectF // coordenadas en espacio del modelo (0..640)
 )
 
 data class VisionOutput(
@@ -25,96 +24,84 @@ data class VisionOutput(
     val text: String? = null
 )
 
-/**
- * VisionAnalyzer:
- * Analiza frames en tiempo real con YOLO11n.tflite.
- * Modular: puede incorporar OCR y voz más adelante.
- */
 class VisionAnalyzer(
     private val context: Context,
     private val onResult: (VisionOutput) -> Unit
 ) : ImageAnalysis.Analyzer {
 
     private var interpreter: Interpreter? = null
-    private val useLabels = false  // cambia a true si quieres usar labels.txt
     private val labels: List<String> by lazy {
-        if (useLabels) {
-            try { FileUtil.loadLabels(context, "labels.txt") }
-            catch (e: Exception) { listOf("obj") }
-        } else {
-            List(80) { "cls_$it" } // genera nombres cls_0, cls_1, etc.
-        }
+        try { FileUtil.loadLabels(context, "labels.txt") } catch (_: Exception) { emptyList() }
     }
-
-    private val inputSize = 640 // según export de Ultralytics
+    private val inputSize = 640
     private val threshold = 0.45f
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     init {
         try {
             val model = FileUtil.loadMappedFile(context, "object_detector.tflite")
             interpreter = Interpreter(model)
-            Log.i("VisionAnalyzer", "✅ Modelo YOLO11n.tflite cargado correctamente.")
+            Log.i("VisionAnalyzer", "Modelo YOLO11n.tflite cargado correctamente.")
         } catch (e: Exception) {
-            Log.e("VisionAnalyzer", "❌ Error cargando modelo: ${e.message}")
+            Log.e("VisionAnalyzer", "Error cargando modelo: ${e.message}")
         }
     }
 
     override fun analyze(image: ImageProxy) {
-        val bmp = BitmapUtils.imageToBitmap(image)
-        val tensorImage = TensorImage.fromBitmap(bmp)
+        val bmp = try { BitmapUtils.imageToBitmap(image) } catch (e: Exception) {
+            Log.e("VisionAnalyzer", "Bitmap conversion error: ${e.message}")
+            image.close(); return
+        }
 
-        val inputBuffer: ByteBuffer = tensorImage.buffer
-        val outputBuffer =
-            TensorBuffer.createFixedSize(intArrayOf(1, 8400, 85), DataType.FLOAT32)
+        val resized = android.graphics.Bitmap.createScaledBitmap(bmp, inputSize, inputSize, true)
+
+        val inputBuffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4)
+        inputBuffer.order(ByteOrder.nativeOrder())
+        inputBuffer.rewind()
+
+        val pixels = IntArray(inputSize * inputSize)
+        resized.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
+        var idx = 0
+        for (y in 0 until inputSize) {
+            for (x in 0 until inputSize) {
+                val p = pixels[idx++]
+                inputBuffer.putFloat(((p ushr 16) and 0xFF) / 255f)
+                inputBuffer.putFloat(((p ushr 8) and 0xFF) / 255f)
+                inputBuffer.putFloat((p and 0xFF) / 255f)
+            }
+        }
+
+        val output = Array(1) { Array(8400) { FloatArray(85) } }
 
         try {
-            interpreter?.run(inputBuffer, outputBuffer.buffer.rewind())
+            val t = measureTimeMillis { interpreter?.run(inputBuffer, output) }
+            Log.d("VisionAnalyzer", "Inferencia en ${t}ms")
         } catch (e: Exception) {
-            Log.e("VisionAnalyzer", "❌ Error en inferencia: ${e.message}")
+            Log.e("VisionAnalyzer", "Error en inferencia: ${e.message}")
+            image.close(); return
+        } finally {
             image.close()
-            return
         }
 
-        val detections = parseDetections(outputBuffer.floatArray, image.width, image.height)
-        onResult(VisionOutput(objects = detections))
-        image.close()
-    }
+        val dets = mutableListOf<DetectedObject>()
+        for (i in 0 until 8400) {
+            val pred = output[0][i]
+            val scores = pred.sliceArray(5 until pred.size)
+            val classId = scores.indices.maxByOrNull { scores[it] } ?: -1
+            val score = if (classId >= 0) scores[classId] * pred[4] else 0f
+            if (score < threshold) continue
 
-    private fun parseDetections(array: FloatArray, imgW: Int, imgH: Int): List<DetectedObject> {
-        val results = mutableListOf<DetectedObject>()
-        val numPred = array.size / 85 // 8400 predicciones
-        for (i in 0 until numPred) {
-            val offset = i * 85
-            val x = array[offset]
-            val y = array[offset + 1]
-            val w = array[offset + 2]
-            val h = array[offset + 3]
-            val conf = array[offset + 4]
-            if (conf < threshold) continue
+            val cx = pred[0]; val cy = pred[1]; val w = pred[2]; val h = pred[3]
+            val left = (cx - w / 2f) * inputSize
+            val top = (cy - h / 2f) * inputSize
+            val right = (cx + w / 2f) * inputSize
+            val bottom = (cy + h / 2f) * inputSize
+            val label = if (labels.isNotEmpty() && classId in labels.indices) labels[classId] else "obj$classId"
 
-            val scores = array.copyOfRange(offset + 5, offset + 85)
-            val (maxCls, maxScore) = scores.withIndex().maxByOrNull { it.value } ?: continue
-            val totalScore = conf * maxScore
-            if (totalScore < threshold) continue
-
-            val cx = x * imgW / inputSize
-            val cy = y * imgH / inputSize
-            val bw = w * imgW / inputSize
-            val bh = h * imgH / inputSize
-
-            val left = max(0f, cx - bw / 2)
-            val top = max(0f, cy - bh / 2)
-            val right = min(imgW.toFloat(), cx + bw / 2)
-            val bottom = min(imgH.toFloat(), cy + bh / 2)
-
-            results.add(
-                DetectedObject(
-                    label = labels.getOrElse(maxCls) { "obj" },
-                    score = totalScore,
-                    box = RectF(left, top, right, bottom)
-                )
-            )
+            dets.add(DetectedObject(label, score, RectF(left, top, right, bottom)))
         }
-        return results.sortedByDescending { it.score }.take(10)
+
+        // Publicar en hilo principal
+        mainHandler.post { onResult(VisionOutput(objects = dets.sortedByDescending { it.score }.take(20))) }
     }
 }

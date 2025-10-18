@@ -13,14 +13,14 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.support.common.FileUtil
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.system.measureTimeMillis
-import com.example.aimesdes.vision.BitmapUtils  // ✅ usa tu versión real
 
 data class Detection(
-    val box: RectF,
+    val box: RectF,     // Coordenadas en espacio del modelo (0..640)
     val score: Float,
     val label: String = ""
 )
@@ -30,26 +30,26 @@ class VisionModule {
     private var interpreter: Interpreter? = null
     private var labels: List<String> = emptyList()
     private var cameraProvider: ProcessCameraProvider? = null
+
+    // Métricas
     private var frameCount = 0
     private var lastFpsTime = System.currentTimeMillis()
     private var fps = 0f
     private var precision = 0f
 
     private lateinit var cameraExecutor: ExecutorService
+    private lateinit var mainExecutor: Executor
 
     private var onResults: ((List<Detection>, Float, Float) -> Unit)? = null
 
     /** Inicializa el modelo YOLO TFLite **/
-    fun initializeModel(context: Context) {
+    private fun initializeModel(context: Context) {
+        if (interpreter != null) return
         try {
             val modelBuffer = FileUtil.loadMappedFile(context, "object_detector.tflite")
             interpreter = Interpreter(modelBuffer)
-            try {
-                labels = FileUtil.loadLabels(context, "labels.txt")
-            } catch (e: Exception) {
-                labels = emptyList()
-                Log.w("AIMES", "No se encontró labels.txt — se usarán índices de clase")
-            }
+            labels = try { FileUtil.loadLabels(context, "labels.txt") }
+            catch (_: Exception) { emptyList() }
             Log.i("AIMES", "Modelo YOLO11n cargado correctamente")
         } catch (e: Exception) {
             Log.e("AIMES", "Error cargando modelo: ${e.message}")
@@ -67,24 +67,25 @@ class VisionModule {
         this.onResults = onResults
         initializeModel(context)
 
-        // Asegura el ejecutor
+        // Ejecutores
         if (!::cameraExecutor.isInitialized || cameraExecutor.isShutdown) {
             cameraExecutor = Executors.newSingleThreadExecutor()
         }
+        mainExecutor = ContextCompat.getMainExecutor(context)
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
             cameraProvider = cameraProviderFuture.get()
 
-            val preview = Preview.Builder().build().also { previewUseCase ->
-                previewView?.let { pv -> previewUseCase.setSurfaceProvider(pv.surfaceProvider) }
+            val preview = Preview.Builder().build().also { p ->
+                previewView?.let { pv -> p.setSurfaceProvider(pv.surfaceProvider) }
             }
 
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-                .also { analysisUseCase ->
-                    analysisUseCase.setAnalyzer(cameraExecutor) { image ->
+                .also { a ->
+                    a.setAnalyzer(cameraExecutor) { image ->
                         processFrame(image)
                     }
                 }
@@ -92,17 +93,12 @@ class VisionModule {
             val selector = CameraSelector.DEFAULT_BACK_CAMERA
             try {
                 cameraProvider?.unbindAll()
-                cameraProvider?.bindToLifecycle(
-                    lifecycleOwner,
-                    selector,
-                    preview,
-                    analysis
-                )
+                cameraProvider?.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
                 Log.i("AIMES", "Cámara iniciada correctamente")
             } catch (e: Exception) {
                 Log.e("AIMES", "Error iniciando cámara: ${e.message}")
             }
-        }, ContextCompat.getMainExecutor(context))
+        }, mainExecutor)
     }
 
     /** Overload compatible (usa Context como LifecycleOwner si puede) **/
@@ -146,58 +142,163 @@ class VisionModule {
             detections.map { it.score }.average().toFloat() * 100f
         } else 0f
 
-        onResults?.invoke(detections, fps, precision)
+        if (::mainExecutor.isInitialized) {
+            mainExecutor.execute { onResults?.invoke(detections, fps, precision) }
+        } else {
+            onResults?.invoke(detections, fps, precision)
+        }
     }
 
-    /** Ejecuta inferencia TFLite **/
+    /** Ejecuta inferencia TFLite: devuelve cajas en espacio 640x640 **/
     private fun runInference(bitmap: android.graphics.Bitmap): List<Detection> {
+        val tfl = interpreter ?: run {
+            Log.e("AIMES", "Interpreter es null. ¿Se cargó el modelo?")
+            return emptyList()
+        }
+
         val inputSize = 640
         val resized = android.graphics.Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
 
-        val inputBuffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4)
-        inputBuffer.order(ByteOrder.nativeOrder())
-
-        val pixels = IntArray(inputSize * inputSize)
-        resized.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
-        var idx = 0
-        for (y in 0 until inputSize) {
-            for (x in 0 until inputSize) {
-                val pixel = pixels[idx++]
-                inputBuffer.putFloat(((pixel shr 16 and 0xFF) / 255f))
-                inputBuffer.putFloat(((pixel shr 8 and 0xFF) / 255f))
-                inputBuffer.putFloat(((pixel and 0xFF) / 255f))
+        // --- Preprocesamiento según tipo de entrada ---
+        val inType = tfl.getInputTensor(0).dataType().toString() // FLOAT32 o UINT8
+        val inputBuffer: ByteBuffer = when (inType) {
+            "FLOAT32" -> {
+                val buf = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4).order(ByteOrder.nativeOrder())
+                val px = IntArray(inputSize * inputSize)
+                resized.getPixels(px, 0, inputSize, 0, 0, inputSize, inputSize)
+                var i = 0
+                for (y in 0 until inputSize) for (x in 0 until inputSize) {
+                    val p = px[i++]
+                    buf.putFloat(((p ushr 16) and 0xFF) / 255f)
+                    buf.putFloat(((p ushr 8) and 0xFF) / 255f)
+                    buf.putFloat((p and 0xFF) / 255f)
+                }
+                buf.rewind(); buf
+            }
+            "UINT8" -> {
+                val buf = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3).order(ByteOrder.nativeOrder())
+                val px = IntArray(inputSize * inputSize)
+                resized.getPixels(px, 0, inputSize, 0, 0, inputSize, inputSize)
+                var i = 0
+                for (y in 0 until inputSize) for (x in 0 until inputSize) {
+                    val p = px[i++]
+                    buf.put(((p ushr 16) and 0xFF).toByte())
+                    buf.put(((p ushr 8) and 0xFF).toByte())
+                    buf.put((p and 0xFF).toByte())
+                }
+                buf.rewind(); buf
+            }
+            else -> {
+                Log.e("AIMES", "Tipo de entrada no soportado: $inType")
+                return emptyList()
             }
         }
 
-        val outputBuffer = Array(1) { Array(8400) { FloatArray(85) } }
+        // --- Descubre salida real ---
+        val outTensor = tfl.getOutputTensor(0)
+        val outShape = outTensor.shape()           // p.ej. [1, 17, 8400] o [1, 8400, 85]
+        val outType = outTensor.dataType().toString() // normalmente FLOAT32
+        val outBytes = outTensor.numBytes()
 
-        val elapsed = measureTimeMillis {
-            interpreter?.run(inputBuffer, outputBuffer)
+        val outBuffer = ByteBuffer.allocateDirect(outBytes).order(ByteOrder.nativeOrder())
+        val inputs = arrayOf<Any>(inputBuffer)
+        val outputs = hashMapOf<Int, Any>(0 to outBuffer)
+
+        val elapsed = kotlin.system.measureTimeMillis {
+            // usar API robusta que acepta ByteBuffer directo de salida
+            tfl.runForMultipleInputsOutputs(inputs, outputs)
         }
-        Log.d("AIMES", "Inferencia YOLO11n ejecutada en ${elapsed}ms")
+        Log.d("AIMES", "Inferencia shape=${outShape.contentToString()} en ${elapsed}ms; outType=$outType")
 
-        val detections = mutableListOf<Detection>()
-        val threshold = 0.4f
+        // --- Parseo genérico del outBuffer como float (si es UINT8/F16, TFLite lo castea a float al leer) ---
+        // Nota: si outType fuera UINT8, podemos leer bytes y convertir; normalmente es FLOAT32.
+        outBuffer.rewind()
+        val floats = FloatArray(outBytes / 4)
+        outBuffer.asFloatBuffer().get(floats)
 
-        outputBuffer[0].forEach { pred ->
-            val scores = pred.sliceArray(4 until pred.size)
-            val classId = scores.indices.maxByOrNull { scores[it] } ?: -1
-            val conf = if (classId >= 0) scores[classId] * pred[4] else 0f
+        val b = outShape.getOrNull(0) ?: 1
+        if (b != 1 || outShape.size != 3) {
+            Log.e("AIMES", "Layout de salida no soportado: ${outShape.contentToString()}")
+            return emptyList()
+        }
+        val a = outShape[1] // puede ser canales o boxes
+        val n = outShape[2] // puede ser boxes o canales
+
+        // Heurística: si a es 84/85/17 => a = canales; n = boxes (tu caso: [1,17,8400])
+        // si n es 84/85/17 => n = canales; a = boxes ([1,8400,85])
+        val channelsFirst = (a in listOf(17, 84, 85)) && (n in listOf(8400, 25200))
+        val boxesFirst    = (a in listOf(8400, 25200)) && (n in listOf(17, 84, 85))
+
+        val results = mutableListOf<Detection>()
+        val threshold = 0.25f
+
+        fun parseVector(vec: FloatArray, classStart: Int, hasObj: Boolean) {
+            if (vec.size <= classStart) return
+            val classScores = vec.copyOfRange(classStart, vec.size)
+            val classId = classScores.indices.maxByOrNull { classScores[it] } ?: -1
+            val obj = if (hasObj) vec[4] else 1f
+            val conf = if (classId >= 0) classScores[classId] * obj else 0f
             if (conf > threshold) {
-                val cx = pred[0]
-                val cy = pred[1]
-                val w = pred[2]
-                val h = pred[3]
+                val cx = vec[0]; val cy = vec[1]; val w = vec[2]; val h = vec[3]
                 val left = (cx - w / 2f) * inputSize
                 val top = (cy - h / 2f) * inputSize
                 val right = (cx + w / 2f) * inputSize
                 val bottom = (cy + h / 2f) * inputSize
                 val label = if (labels.isNotEmpty() && classId in labels.indices) labels[classId] else "obj$classId"
-                detections.add(Detection(RectF(left, top, right, bottom), conf, label))
+                results.add(Detection(RectF(left, top, right, bottom), conf, label))
             }
         }
 
-        return detections
+        when {
+            channelsFirst -> {
+                val C = a; val K = n
+                // buffers: [1, C, K] linealizado → index = (c*K + k)
+                // ¿hay obj? inferimos por labels o heurística
+                val hasObj = when {
+                    labels.isNotEmpty() && C - 5 == labels.size -> true
+                    labels.isNotEmpty() && C - 4 == labels.size -> false
+                    else -> (C - 5) >= 1
+                }
+                val classStart = if (hasObj) 5 else 4
+
+                for (k in 0 until K) {
+                    val vec = FloatArray(C)
+                    var base = k
+                    var c = 0
+                    while (c < C) {
+                        vec[c] = floats[base]
+                        base += K
+                        c++
+                    }
+                    parseVector(vec, classStart, hasObj)
+                }
+            }
+            boxesFirst -> {
+                val K = a; val C = n
+                // buffers: [1, K, C] linealizado → index = (k*C + c)
+                val hasObj = when {
+                    labels.isNotEmpty() && C - 5 == labels.size -> true
+                    labels.isNotEmpty() && C - 4 == labels.size -> false
+                    else -> (C - 5) >= 1
+                }
+                val classStart = if (hasObj) 5 else 4
+
+                var k = 0
+                while (k < K) {
+                    val base = k * C
+                    val vec = floats.copyOfRange(base, base + C)
+                    parseVector(vec, classStart, hasObj)
+                    k++
+                }
+            }
+            else -> {
+                Log.e("AIMES", "Layout no reconocido (a=$a, n=$n) en ${outShape.contentToString()}")
+            }
+        }
+
+        val finalDetections = results.sortedByDescending { it.score }.take(50)
+        Log.i("AIMES", "Detecciones=${finalDetections.size} (umbral=$threshold)")
+        return finalDetections
     }
 
     /** Detiene la cámara y libera recursos **/

@@ -14,6 +14,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -22,7 +23,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.aimesdes.vision.Detection
 import com.example.aimesdes.vision.VisionModule
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -38,14 +41,38 @@ fun PerformanceTestScreen(
     var precision by remember { mutableStateOf(0f) }
     var detections by remember { mutableStateOf<List<Detection>>(emptyList()) }
 
-    // Mantener referencia al PreviewView para controlarlo fuera del factory
     var previewRef by remember { mutableStateOf<PreviewView?>(null) }
 
-    // Al salir de la pantalla: detener cámara y liberar
-    DisposableEffect(Unit) {
-        onDispose {
-            visionModule.stopCamera()
+    // Permiso de cámara
+    val hasCameraPermInit = ContextCompat.checkSelfPermission(
+        context, android.Manifest.permission.CAMERA
+    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    var hasCameraPerm by remember { mutableStateOf(hasCameraPermInit) }
+
+    val cameraPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCameraPerm = granted
+        if (granted) {
+            val pv = previewRef
+            if (pv != null) {
+                visionModule.startCamera(
+                    context = context,
+                    lifecycleOwner = lifecycleOwner,
+                    previewView = pv
+                ) { dets, newFps, newPrecision ->
+                    detections = dets
+                    fps = newFps
+                    precision = newPrecision
+                }
+                isRunning = true
+            }
         }
+    }
+
+    // Al salir de la pantalla: detener cámara
+    DisposableEffect(Unit) {
+        onDispose { visionModule.stopCamera() }
     }
 
     Scaffold(
@@ -81,7 +108,7 @@ fun PerformanceTestScreen(
                 }
             )
 
-            // Overlay de detecciones
+            // Overlay de detecciones (solo dibuja)
             DetectionsOverlay(detections = detections)
 
             // Panel de control
@@ -105,18 +132,22 @@ fun PerformanceTestScreen(
                             visionModule.stopCamera()
                             isRunning = false
                         } else {
-                            val pv = previewRef
-                            if (pv != null) {
-                                visionModule.startCamera(
-                                    context = context,
-                                    lifecycleOwner = lifecycleOwner,
-                                    previewView = pv
-                                ) { dets, newFps, newPrecision ->
-                                    detections = dets
-                                    fps = newFps
-                                    precision = newPrecision
+                            if (!hasCameraPerm) {
+                                cameraPermLauncher.launch(android.Manifest.permission.CAMERA)
+                            } else {
+                                val pv = previewRef
+                                if (pv != null) {
+                                    visionModule.startCamera(
+                                        context = context,
+                                        lifecycleOwner = lifecycleOwner,
+                                        previewView = pv
+                                    ) { dets, newFps, newPrecision ->
+                                        detections = dets
+                                        fps = newFps
+                                        precision = newPrecision
+                                    }
+                                    isRunning = true
                                 }
-                                isRunning = true
                             }
                         }
                     },
@@ -139,35 +170,39 @@ fun PerformanceTestScreen(
 @Composable
 private fun DetectionsOverlay(
     detections: List<Detection>,
-    modelInputSize: Int = 640 // debe coincidir con VisionModule.runInference
+    modelInputSize: Int = 640
 ) {
     val density = LocalDensity.current
     var overlayW by remember { mutableStateOf(0) } // px
     var overlayH by remember { mutableStateOf(0) } // px
 
-    // Escalas dinámicas (px del modelo -> px del overlay)
-    val sx = remember(overlayW, modelInputSize) {
-        if (modelInputSize != 0) overlayW.toFloat() / modelInputSize else 1f
+    // Para FILL_CENTER: se usa el mayor de los dos escalados y se centra (puede haber crop)
+    val scale = remember(overlayW, overlayH, modelInputSize) {
+        if (modelInputSize == 0) 1f else maxOf(
+            overlayW.toFloat() / modelInputSize,
+            overlayH.toFloat() / modelInputSize
+        )
     }
-    val sy = remember(overlayH, modelInputSize) {
-        if (modelInputSize != 0) overlayH.toFloat() / modelInputSize else 1f
-    }
+    val contentW = modelInputSize * scale
+    val contentH = modelInputSize * scale
+    val offsetX = (overlayW - contentW) / 2f
+    val offsetY = (overlayH - contentH) / 2f
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .onSizeChanged { intSize ->           // <- IntSize
-                overlayW = intSize.width          // <- propiedades, sin "()"
-                overlayH = intSize.height
+            .onSizeChanged { s ->
+                overlayW = s.width
+                overlayH = s.height
             }
     ) {
-        // 1) Rectángulos escalados correctamente
+        // Rectángulos
         Canvas(modifier = Modifier.fillMaxSize()) {
             detections.forEach { det ->
-                val left = det.box.left * sx
-                val top = det.box.top * sy
-                val w = det.box.width() * sx
-                val h = det.box.height() * sy
+                val left = offsetX + det.box.left * scale
+                val top = offsetY + det.box.top * scale
+                val w = det.box.width() * scale
+                val h = det.box.height() * scale
 
                 drawRect(
                     color = Color(0xFF8A2BE2),
@@ -178,10 +213,10 @@ private fun DetectionsOverlay(
             }
         }
 
-        // 2) Etiquetas perfectamente posicionadas (px -> dp)
+        // Etiquetas (px -> dp)
         detections.forEach { det ->
-            val lxDp = with(density) { (det.box.left * sx + 8f).toDp() }
-            val lyDp = with(density) { (det.box.top * sy + 8f).toDp() }
+            val lxDp = with(density) { (offsetX + det.box.left * scale + 8f).toDp() }
+            val lyDp = with(density) { (offsetY + det.box.top * scale + 8f).toDp() }
 
             Text(
                 text = "${det.label} ${(det.score * 100).toInt()}%",

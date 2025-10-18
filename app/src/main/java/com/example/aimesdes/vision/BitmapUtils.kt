@@ -1,14 +1,12 @@
 package com.example.aimesdes.vision
 
-import android.graphics.Bitmap
-import android.graphics.ImageFormat
-import android.graphics.YuvImage
+import android.graphics.*
 import androidx.camera.core.ImageProxy
 import java.io.ByteArrayOutputStream
-import java.nio.ByteBuffer
 
 object BitmapUtils {
     fun imageToBitmap(image: ImageProxy): Bitmap {
+        // YUV_420_888 -> NV21
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
         val vBuffer = image.planes[2].buffer
@@ -19,13 +17,21 @@ object BitmapUtils {
 
         val nv21 = ByteArray(ySize + uSize + vSize)
         yBuffer.get(nv21, 0, ySize)
+        // NV21 = Y + V + U
         vBuffer.get(nv21, ySize, vSize)
         uBuffer.get(nv21, ySize + vSize, uSize)
 
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
         val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(android.graphics.Rect(0, 0, image.width, image.height), 80, out)
-        val imageBytes = out.toByteArray()
-        return android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+        yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 90, out)
+        val bytes = out.toByteArray()
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+
+        // Rotar según orientación del frame
+        val rotation = image.imageInfo.rotationDegrees
+        if (rotation == 0) return bmp
+
+        val m = Matrix().apply { postRotate(rotation.toFloat()) }
+        return Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
     }
 }
