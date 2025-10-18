@@ -230,7 +230,7 @@ class VisionModule {
         val boxesFirst    = (a in listOf(8400, 25200)) && (n in listOf(17, 84, 85))
 
         val results = mutableListOf<Detection>()
-        val threshold = 0.25f
+        val threshold = 0.30f
 
         fun parseVector(vec: FloatArray, classStart: Int, hasObj: Boolean) {
             if (vec.size <= classStart) return
@@ -252,16 +252,14 @@ class VisionModule {
         when {
             channelsFirst -> {
                 val C = a; val K = n
-                // buffers: [1, C, K] linealizado → index = (c*K + k)
-                // ¿hay obj? inferimos por labels o heurística
-                val hasObj = when {
-                    labels.isNotEmpty() && C - 5 == labels.size -> true
-                    labels.isNotEmpty() && C - 4 == labels.size -> false
-                    else -> (C - 5) >= 1
-                }
-                val classStart = if (hasObj) 5 else 4
-
+                // outBuffer ya lo convertimos a 'floats'
+                // Layout linealizado [1, C, K] => index = c*K + k
+                // Para cada caja k armamos el vector de longitud C y probamos ambos esquemas:
+                //   - sin obj:  vec = [cx,cy,w,h, cls0..]
+                //   - con obj: vec = [cx,cy,w,h,obj, cls0..]
+                // Elegimos el que da mayor confianza.
                 for (k in 0 until K) {
+                    // Construir vector de canales para la caja k
                     val vec = FloatArray(C)
                     var base = k
                     var c = 0
@@ -270,7 +268,55 @@ class VisionModule {
                         base += K
                         c++
                     }
-                    parseVector(vec, classStart, hasObj)
+
+                    // Requiere al menos 4 coords
+                    if (C < 5) continue
+
+                    // Caso A: sin 'obj'
+                    val classStartNoObj = 4
+                    val classesNoObj = (C - classStartNoObj).coerceAtLeast(0)
+                    var bestIdNoObj = -1
+                    var bestScoreNoObj = 0f
+                    if (classesNoObj > 0) {
+                        for (i in 0 until classesNoObj) {
+                            val s = vec[classStartNoObj + i]
+                            if (s > bestScoreNoObj) { bestScoreNoObj = s; bestIdNoObj = i }
+                        }
+                    }
+
+                    // Caso B: con 'obj' (índice 4)
+                    val hasObjPossible = C >= 6 // al menos 4 coords + obj + 1 clase
+                    var bestIdWithObj = -1
+                    var bestScoreWithObj = 0f
+                    var objVal = 1f
+                    if (hasObjPossible) {
+                        objVal = vec[4]
+                        val classStartWithObj = 5
+                        val classesWithObj = (C - classStartWithObj).coerceAtLeast(0)
+                        var bestCls = -1
+                        var bestClsScore = 0f
+                        for (i in 0 until classesWithObj) {
+                            val s = vec[classStartWithObj + i]
+                            if (s > bestClsScore) { bestClsScore = s; bestCls = i }
+                        }
+                        bestIdWithObj = bestCls
+                        bestScoreWithObj = bestClsScore * objVal
+                    }
+
+                    // Elegir el esquema con mayor confianza
+                    val useWithObj = hasObjPossible && bestScoreWithObj >= bestScoreNoObj
+                    val conf = if (useWithObj) bestScoreWithObj else bestScoreNoObj
+                    val classId = if (useWithObj) bestIdWithObj else bestIdNoObj
+
+                    if (classId >= 0 && conf > threshold) {
+                        val cx = vec[0]; val cy = vec[1]; val w = vec[2]; val h = vec[3]
+                        val left = (cx - w / 2f) * inputSize
+                        val top = (cy - h / 2f) * inputSize
+                        val right = (cx + w / 2f) * inputSize
+                        val bottom = (cy + h / 2f) * inputSize
+                        val label = if (labels.isNotEmpty() && classId in labels.indices) labels[classId] else "obj$classId"
+                        results.add(Detection(RectF(left, top, right, bottom), conf, label))
+                    }
                 }
             }
             boxesFirst -> {
