@@ -16,7 +16,7 @@ import kotlin.system.measureTimeMillis
 data class DetectedObject(
     val label: String,
     val score: Float,
-    val box: RectF // coordenadas en espacio del modelo (0..640)
+    val box: RectF
 )
 
 data class VisionOutput(
@@ -101,7 +101,6 @@ class VisionAnalyzer(
             dets.add(DetectedObject(label, score, RectF(left, top, right, bottom)))
         }
 
-        // Publicar en hilo principal
         mainHandler.post { onResult(VisionOutput(objects = dets.sortedByDescending { it.score }.take(20))) }
     }
 }

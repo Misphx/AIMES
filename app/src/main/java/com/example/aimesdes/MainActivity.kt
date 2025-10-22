@@ -43,6 +43,9 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.aimesdes.ui.PerformanceTestScreen
 import com.example.aimesdes.vision.VisionModule
+import com.example.aimesdes.orientation.OrientationResult
+import com.example.aimesdes.orientation.Position
+import com.example.aimesdes.orientation.Distance
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.text.Normalizer
@@ -76,6 +79,10 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
     private val handler = Handler(Looper.getMainLooper())
     private var lastIntent: Intent? = null
     private var utteranceCounter = 0
+
+    private var lastGuideKey: String? = null
+    private var lastGuideAtMs: Long = 0
+
 
     init {
         comandos = cargarComandos()
@@ -192,7 +199,41 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
             tokens.all { token -> normText.contains(token) }
         }
     }
+
+    fun speakOrientation(
+        result: OrientationResult,
+        minIntervalMs: Long = 1500L,
+        minConfidence: Float = 0.25f
+    ) {
+        if (result.confidence < minConfidence) return
+
+        val key = "${result.label}:${result.position}:${result.distance}"
+        val now = System.currentTimeMillis()
+        if (key == lastGuideKey && now - lastGuideAtMs < minIntervalMs) return
+
+        val pos = when (result.position) {
+            Position.IZQUIERDA -> "izquierda"
+            Position.CENTRO_IZQUIERDA -> "centro izquierda"
+            Position.CENTRO -> "al centro"
+            Position.CENTRO_DERECHA -> "centro derecha"
+            Position.DERECHA -> "derecha"
+        }
+        val dist = when (result.distance) {
+            Distance.CERCA -> "cerca"
+            Distance.MEDIO -> "a media distancia"
+            Distance.LEJOS -> "lejos"
+        }
+        val confPct = (result.confidence * 100).toInt()
+        val texto = "${result.label} $pos, $dist, $confPct por ciento."
+
+        reproducirTexto(texto) // usa tu TTS existente
+        uiState.value = uiState.value.copy(assistantResponse = texto)
+
+        lastGuideKey = key
+        lastGuideAtMs = now
+    }
 }
+
 
 /* ------------------- Main Activity ------------------- */
 
@@ -229,7 +270,10 @@ class MainActivity : ComponentActivity() {
                         SimpleScreen("Ayuda", "Pantalla de ayuda") { nav.popBackStack() }
                     }
                     composable("performance_test") {
-                        PerformanceTestScreen(visionModule = visionModule) // ✅ llamado correcto
+                        PerformanceTestScreen(
+                            visionModule = visionModule,
+                            asistenteViewModel = asistenteViewModel
+                        )
                     }
                 }
             }

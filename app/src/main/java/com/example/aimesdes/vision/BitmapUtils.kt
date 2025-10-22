@@ -6,7 +6,6 @@ import java.io.ByteArrayOutputStream
 
 object BitmapUtils {
     fun imageToBitmap(image: ImageProxy): Bitmap {
-        // YUV_420_888 -> NV21
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
         val vBuffer = image.planes[2].buffer
@@ -17,7 +16,6 @@ object BitmapUtils {
 
         val nv21 = ByteArray(ySize + uSize + vSize)
         yBuffer.get(nv21, 0, ySize)
-        // NV21 = Y + V + U
         vBuffer.get(nv21, ySize, vSize)
         uBuffer.get(nv21, ySize + vSize, uSize)
 

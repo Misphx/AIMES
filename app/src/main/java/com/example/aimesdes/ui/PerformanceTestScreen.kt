@@ -23,25 +23,40 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.aimesdes.vision.Detection
 import com.example.aimesdes.vision.VisionModule
+import com.example.aimesdes.orientation.OrientationModule
+import com.example.aimesdes.orientation.OrientationResult
+import com.example.aimesdes.orientation.Position
+import com.example.aimesdes.orientation.Distance
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+
+// importa tu ViewModel (está declarado en el mismo package com.example.aimesdes)
+import com.example.aimesdes.AsistenteViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PerformanceTestScreen(
     visionModule: VisionModule,
+    asistenteViewModel: AsistenteViewModel,   // <<--- ViewModel para TTS
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    // Estado visión
     var isRunning by remember { mutableStateOf(false) }
     var fps by remember { mutableStateOf(0f) }
     var precision by remember { mutableStateOf(0f) }
     var detections by remember { mutableStateOf<List<Detection>>(emptyList()) }
 
+    // PreviewView para CameraX
     var previewRef by remember { mutableStateOf<PreviewView?>(null) }
+
+    // Orientación
+    val orientation = remember { OrientationModule(targetLabel = null) } // p.ej. "entrada"
+    var orientResults by remember { mutableStateOf<List<OrientationResult>>(emptyList()) }
+    var bestOrient by remember { mutableStateOf<OrientationResult?>(null) }
 
     // Permiso de cámara
     val hasCameraPermInit = ContextCompat.checkSelfPermission(
@@ -64,13 +79,21 @@ fun PerformanceTestScreen(
                     detections = dets
                     fps = newFps
                     precision = newPrecision
+
+                    val w = previewRef?.width ?: 0
+                    val h = previewRef?.height ?: 0
+                    orientResults = orientation.analyze(dets, w, h)
+                    bestOrient = orientation.selectBest(orientResults)
+
+                    // TTS inmediato con anti-flood en el ViewModel
+                    bestOrient?.let { asistenteViewModel.speakOrientation(it) }
                 }
                 isRunning = true
             }
         }
     }
 
-    // Al salir de la pantalla: detener cámara
+    // Al salir: apagar cámara
     DisposableEffect(Unit) {
         onDispose { visionModule.stopCamera() }
     }
@@ -92,7 +115,7 @@ fun PerformanceTestScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // Vista de cámara (solo crea la vista; no inicia la cámara aquí)
+            // Vista de cámara
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
@@ -108,10 +131,13 @@ fun PerformanceTestScreen(
                 }
             )
 
-            // Overlay de detecciones (solo dibuja)
-            DetectionsOverlay(detections = detections)
+            // Overlay con cajas y labels orientados
+            DetectionsOverlay(
+                orientation = orientResults,
+                modelInputSize = 640
+            )
 
-            // Panel de control
+            // Panel inferior
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -120,12 +146,23 @@ fun PerformanceTestScreen(
                     .padding(12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                val guide = bestOrient?.let { orientation.formatTts(it) } ?: "Buscando objetivo…"
+                Text(
+                    text = guide,
+                    color = Color.White,
+                    fontSize = 14.sp
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
                 Text(
                     text = "FPS: ${"%.2f".format(fps)}  |  Precisión: ${"%.1f".format(precision)}%",
                     color = Color.White,
                     fontSize = 14.sp
                 )
+
                 Spacer(modifier = Modifier.height(8.dp))
+
                 Button(
                     onClick = {
                         if (isRunning) {
@@ -145,6 +182,14 @@ fun PerformanceTestScreen(
                                         detections = dets
                                         fps = newFps
                                         precision = newPrecision
+
+                                        val w = previewRef?.width ?: 0
+                                        val h = previewRef?.height ?: 0
+                                        orientResults = orientation.analyze(dets, w, h)
+                                        bestOrient = orientation.selectBest(orientResults)
+
+                                        // TTS en botón start
+                                        bestOrient?.let { asistenteViewModel.speakOrientation(it) }
                                     }
                                     isRunning = true
                                 }
@@ -169,14 +214,14 @@ fun PerformanceTestScreen(
 
 @Composable
 private fun DetectionsOverlay(
-    detections: List<Detection>,
+    orientation: List<OrientationResult>,
     modelInputSize: Int = 640
 ) {
     val density = LocalDensity.current
-    var overlayW by remember { mutableStateOf(0) } // px
-    var overlayH by remember { mutableStateOf(0) } // px
+    var overlayW by remember { mutableStateOf(0) }
+    var overlayH by remember { mutableStateOf(0) }
 
-    // Para FILL_CENTER: se usa el mayor de los dos escalados y se centra (puede haber crop)
+    // FILL_CENTER → escalar por el mayor factor y centrar
     val scale = remember(overlayW, overlayH, modelInputSize) {
         if (modelInputSize == 0) 1f else maxOf(
             overlayW.toFloat() / modelInputSize,
@@ -198,11 +243,11 @@ private fun DetectionsOverlay(
     ) {
         // Rectángulos
         Canvas(modifier = Modifier.fillMaxSize()) {
-            detections.forEach { det ->
-                val left = offsetX + det.box.left * scale
-                val top = offsetY + det.box.top * scale
-                val w = det.box.width() * scale
-                val h = det.box.height() * scale
+            orientation.forEach { res ->
+                val left = offsetX + res.box.left * scale
+                val top = offsetY + res.box.top * scale
+                val w = res.box.width() * scale
+                val h = res.box.height() * scale
 
                 drawRect(
                     color = Color(0xFF8A2BE2),
@@ -213,13 +258,27 @@ private fun DetectionsOverlay(
             }
         }
 
-        // Etiquetas (px -> dp)
-        detections.forEach { det ->
-            val lxDp = with(density) { (offsetX + det.box.left * scale + 8f).toDp() }
-            val lyDp = with(density) { (offsetY + det.box.top * scale + 8f).toDp() }
+        // Etiquetas orientadas
+        orientation.forEach { res ->
+            val lxDp = with(density) { (offsetX + res.box.left * scale + 8f).toDp() }
+            val lyDp = with(density) { (offsetY + res.box.top * scale + 8f).toDp() }
+
+            val posTxt = when (res.position) {
+                Position.IZQUIERDA -> "Izq"
+                Position.CENTRO_IZQUIERDA -> "C-Izq"
+                Position.CENTRO -> "Centro"
+                Position.CENTRO_DERECHA -> "C-Der"
+                Position.DERECHA -> "Der"
+            }
+            val distTxt = when (res.distance) {
+                Distance.CERCA -> "cerca"
+                Distance.MEDIO -> "medio"
+                Distance.LEJOS -> "lejos"
+            }
+            val text = "${res.label} ${(res.confidence * 100).toInt()}% • $posTxt • $distTxt"
 
             Text(
-                text = "${det.label} ${(det.score * 100).toInt()}%",
+                text = text,
                 color = Color.White,
                 fontSize = 14.sp,
                 modifier = Modifier
