@@ -223,7 +223,7 @@ class VisionModule {
         val boxesFirst    = (a in listOf(8400, 25200)) && (n in listOf(17, 84, 85))
 
         val results = mutableListOf<Detection>()
-        val threshold = 0.30f
+        val threshold = 0.70f
 
         fun parseVector(vec: FloatArray, classStart: Int, hasObj: Boolean) {
             if (vec.size <= classStart) return
@@ -329,7 +329,14 @@ class VisionModule {
             }
         }
 
-        val finalDetections = results.sortedByDescending { it.score }.take(50)
+        val nmsDetections = try {
+            nms(results.filter { it.box.width() > 0f && it.box.height() > 0f }, 0.45f)
+        } catch (e: Exception) {
+            Log.e("AIMES", "Error en NMS: ${e.message}")
+            results
+        }
+
+        val finalDetections = nmsDetections.sortedByDescending { it.score }.take(50)
         Log.i("AIMES", "Detecciones=${finalDetections.size} (umbral=$threshold)")
         return finalDetections
     }
@@ -352,4 +359,32 @@ class VisionModule {
             Log.e("AIMES", "Error al detener cámara: ${e.message}")
         }
     }
+}
+
+private fun nms(detections: List<Detection>, iouThreshold: Float = 0.7f): List<Detection> {
+    if (detections.isEmpty()) return emptyList()
+    val sorted = detections.sortedByDescending { it.score }.toMutableList()
+    val result = mutableListOf<Detection>()
+
+    while (sorted.isNotEmpty()) {
+        val best = sorted.removeAt(0)
+        result.add(best)
+        sorted.removeAll { other ->
+            val overlap = iou(best.box, other.box)
+            !overlap.isNaN() && overlap > iouThreshold
+        }
+    }
+    return result
+}
+
+private fun iou(a: RectF, b: RectF): Float {
+    val x1 = maxOf(a.left, b.left)
+    val y1 = maxOf(a.top, b.top)
+    val x2 = minOf(a.right, b.right)
+    val y2 = minOf(a.bottom, b.bottom)
+    val interW = maxOf(0f, x2 - x1)
+    val interH = maxOf(0f, y2 - y1)
+    val intersection = interW * interH
+    val union = a.width() * a.height() + b.width() * b.height() - intersection
+    return if (union <= 0) 0f else intersection / union
 }
