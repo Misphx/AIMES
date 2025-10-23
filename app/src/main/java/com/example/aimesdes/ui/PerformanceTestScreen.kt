@@ -23,12 +23,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.aimesdes.vision.Detection
 import com.example.aimesdes.vision.VisionModule
-import com.example.aimesdes.orientation.OrientationModule
-import com.example.aimesdes.orientation.OrientationResult
-import com.example.aimesdes.orientation.Position
-import com.example.aimesdes.orientation.Distance
+import com.example.aimesdes.orientation.*
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.core.content.ContextCompat
 
 // importa tu ViewModel (está declarado en el mismo package com.example.aimesdes)
@@ -243,19 +241,63 @@ private fun DetectionsOverlay(
     ) {
         // Rectángulos
         Canvas(modifier = Modifier.fillMaxSize()) {
+            // --- Cálculo de escalas y offsets ---
+            val overlayW = size.width
+            val overlayH = size.height
+
+            // Punto de referencia: centro inferior de la cámara
+            val refPoint = Offset(overlayW / 2f, overlayH)
+
+            // --- Detecciones ---
             orientation.forEach { res ->
                 val left = offsetX + res.box.left * scale
                 val top = offsetY + res.box.top * scale
                 val w = res.box.width() * scale
                 val h = res.box.height() * scale
 
+                // Centro del bounding box detectado
+                val objCenter = Offset(left + w / 2f, top + h / 2f)
+
+                // Dibujar rectángulo del objeto
                 drawRect(
                     color = Color(0xFF8A2BE2),
                     topLeft = Offset(left, top),
                     size = Size(w, h),
                     style = Stroke(width = 4f)
                 )
+
+                // --- Línea desde punto referencial hasta el objeto ---
+                drawLine(
+                    color = Color.Cyan,
+                    start = refPoint,
+                    end = objCenter,
+                    strokeWidth = 3f
+                )
+
+                // --- Texto con distancia estimada ---
+                val distanceText = if (res.distanceMeters != null)
+                    "${"%.1f".format(res.distanceMeters)} m"
+                else
+                    res.distance.name.lowercase()
+
+                drawContext.canvas.nativeCanvas.drawText(
+                    distanceText,
+                    objCenter.x,
+                    objCenter.y - h / 2f - 10f,
+                    android.graphics.Paint().apply {
+                        color = android.graphics.Color.CYAN
+                        textSize = 36f
+                        isFakeBoldText = true
+                    }
+                )
             }
+
+            // --- Punto de referencia (marcador visual) ---
+            drawCircle(
+                color = Color.Red,
+                radius = 10f,
+                center = refPoint
+            )
         }
 
         // Etiquetas orientadas
