@@ -30,6 +30,23 @@ class OrientationModule(
     private val nearTh = 0.45f
     private val midTh  = 0.25f
 
+    private var labelNames: List<String> = emptyList()
+    fun setLabels(names: List<String>) { labelNames = names }
+
+    private val objIdxRegex = Regex("""^obj(\d+)$""")
+    private fun resolveLabel(raw: String): String {
+        // obj3 -> labels[3]; si no hay match, devuelve tal cual
+        val m = objIdxRegex.matchEntire(raw)
+        if (m != null) {
+            val idx = m.groupValues[1].toIntOrNull()
+            if (idx != null && idx in labelNames.indices) {
+                return labelNames[idx]
+            }
+        }
+        return raw
+    }
+    private fun humanize(raw: String) = raw.replace('_', ' ')
+
     private fun mapPosition(centerX: Float, frameW: Int): Position {
         val w = frameW.toFloat()
         return when {
@@ -101,9 +118,10 @@ class OrientationModule(
             val dPOV = estimateDistancePOV(det.box.bottom, frameH)
             val dFused = fuseDistances(dPinhole, dPOV)
             val dFinal = dFused?.let { applyAngularCorrection(it, cx, frameW) }
+            val PLabel = humanize(resolveLabel(det.label))
 
             OrientationResult(
-                label = det.label,
+                label = PLabel,
                 confidence = det.score,
                 position = pos,
                 distance = distCat,
@@ -113,13 +131,29 @@ class OrientationModule(
         }
     }
 
+    private fun distanceScore(r: OrientationResult): Float {
+        // Score menor = más prioritario (más cerca)
+        val bucket = when (r.distance) {
+            Distance.CERCA -> 0f
+            Distance.MEDIO -> 1f
+            Distance.LEJOS -> 2f
+        }
+        val metersPart = r.distanceMeters ?: Float.POSITIVE_INFINITY
+        // Si tenemos metros, prioriza por metros; si no, por bucket. Empate: mayor confianza.
+        return if (r.distanceMeters != null)
+            metersPart - r.confidence * 0.01f
+        else
+            bucket - r.confidence * 0.01f
+    }
     fun selectBest(results: List<OrientationResult>): OrientationResult? {
         if (results.isEmpty()) return null
+
         val target = targetLabel?.lowercase()?.trim()
         val subset = if (!target.isNullOrEmpty()) {
             results.filter { it.label.lowercase().trim() == target }
         } else results
-        return subset.maxByOrNull { it.confidence }
+
+        return subset.minByOrNull { distanceScore(it) }
     }
 
     fun formatTts(result: OrientationResult): String {

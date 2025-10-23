@@ -1,0 +1,64 @@
+{
+  "comandos": [
+    {
+      "entrada": "estoy en los leones",
+      "intencion": "ubicar",
+      "objeto": "los leones"
+    },
+    {
+      "entrada": "buscar ascensor|donde esta el ascensor|necesito un ascensor",
+      "intencion": "buscar_objeto",
+      "objeto": "ascensor"
+    },
+    {
+      "entrada": "buscar salida|donde esta la salida|salida de emergencia",
+      "intencion": "buscar_objeto",
+      "objeto": "salida"
+    },
+    {
+      "entrada": "activar guiado|iniciar guiado|empezar guia",
+      "intencion": "activar_guiado",
+      "modo": "sonoro"
+    },
+    {
+      "entrada": "confirmar",
+      "intencion": "confirmacion"
+    },
+    {
+      "entrada": "cancelar",
+      "intencion": "cancelar"
+    },
+    {
+      "entrada": "modificar",
+      "intencion": "modificar"
+    },
+    {
+      "entrada": "repetir",
+      "intencion": "repetir"
+    },
+    {
+      "entrada": "quiero ir a estación los leones",
+      "intencion": "destino_estacion",
+      "estacion": "los leones"
+    },
+    {
+      "entrada": "voy a estación universidad de chile",
+      "intencion": "destino_estacion",
+      "estacion": "universidad de chile"
+    },
+    {
+      "entrada": "me dirijo a estación franklin",
+      "intencion": "destino_estacion",
+      "estacion": "franklin"
+    },
+    {
+      "entrada": "salida estación ñuñoa",
+      "intencion": "destino_estacion",
+      "estacion": "ñuñoa"
+    },
+    {
+      "entrada": "información de entorno",
+      "intencion": "estado_entorno"
+    }
+  ]
+}

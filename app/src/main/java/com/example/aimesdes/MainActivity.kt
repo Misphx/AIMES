@@ -1,20 +1,18 @@
 package com.example.aimesdes
 
-import android.app.Application
-import android.content.Intent
+
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import androidx.compose.ui.text.input.KeyboardType
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -31,27 +29,36 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.AndroidViewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.aimesdes.ui.PerformanceTestScreen
 import com.example.aimesdes.vision.VisionModule
-import com.example.aimesdes.orientation.OrientationResult
-import com.example.aimesdes.orientation.Position
-import com.example.aimesdes.orientation.Distance
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
-import java.text.Normalizer
+import com.example.aimesdes.AsistenteViewModel.*
 import java.util.Locale
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.TextFieldColors
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.foundation.text.KeyboardOptions
 
-/* ------------------- ViewModel y Data ------------------- */
+/* ------------------- Datos comandos / estado UI ------------------- */
 
 data class Comando(
     val entrada: String,
@@ -70,172 +77,8 @@ data class AsistenteUIState(
     val micRmsDb: Float = 0f
 )
 
-class AsistenteViewModel(application: Application) : AndroidViewModel(application) {
-    val uiState = mutableStateOf(AsistenteUIState())
-    private var tts: TextToSpeech? = null
-    private val speechRecognizer: SpeechRecognizer =
-        SpeechRecognizer.createSpeechRecognizer(application)
-    private val comandos: List<Comando>
-    private val handler = Handler(Looper.getMainLooper())
-    private var lastIntent: Intent? = null
-    private var utteranceCounter = 0
 
-    private var lastGuideKey: String? = null
-    private var lastGuideAtMs: Long = 0
-
-
-    init {
-        comandos = cargarComandos()
-        setupTts()
-        setupSpeechRecognizer()
-        greetUser()
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        try { speechRecognizer.destroy() } catch (_: Exception) {}
-        try { tts?.shutdown() } catch (_: Exception) {}
-    }
-
-    private fun greetUser() {
-        val mensaje = "Hola. ¿En qué puedo ayudarte?"
-        reproducirTexto(mensaje)
-        uiState.value = uiState.value.copy(assistantResponse = mensaje)
-    }
-
-    fun startListening() {
-        try { tts?.stop() } catch (_: Exception) {}
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-CL")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getApplication<Application>().packageName)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
-        }
-        lastIntent = intent
-        try {
-            speechRecognizer.startListening(intent)
-            uiState.value = uiState.value.copy(isListening = true, recognizedText = "Escuchando...")
-        } catch (_: Exception) {
-            uiState.value = uiState.value.copy(isListening = false, recognizedText = "Error al iniciar micrófono")
-        }
-    }
-
-    fun stopListening() {
-        try { speechRecognizer.stopListening() } catch (_: Exception) {}
-        uiState.value = uiState.value.copy(isListening = false)
-    }
-
-    private fun setupTts() {
-        tts = TextToSpeech(getApplication()) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale("es", "CL")
-            }
-        }
-    }
-
-    private fun setupSpeechRecognizer() {
-        val recognitionListener = object : RecognitionListener {
-            override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val spoken = matches?.firstOrNull()
-                if (spoken != null) {
-                    uiState.value = uiState.value.copy(recognizedText = spoken, isListening = false)
-                    procesarComando(spoken)
-                }
-            }
-            override fun onError(error: Int) { uiState.value = uiState.value.copy(isListening = false) }
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onRmsChanged(rmsdB: Float) { uiState.value = uiState.value.copy(micRmsDb = rmsdB) }
-            override fun onBeginningOfSpeech() {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        }
-        speechRecognizer.setRecognitionListener(recognitionListener)
-    }
-
-    private fun cargarComandos(): List<Comando> {
-        return try {
-            val jsonString = getApplication<Application>().assets.open("comandos.json")
-                .bufferedReader().use { it.readText() }
-            val type = object : TypeToken<ComandosWrapper>() {}.type
-            Gson().fromJson<ComandosWrapper>(jsonString, type).comandos
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    private fun procesarComando(texto: String) {
-        val normText = normalize(texto)
-        val comandoEncontrado = comandos.find { matchesCommand(normText, it) }
-        if (comandoEncontrado != null) {
-            reproducirTexto("Ejecutando ${comandoEncontrado.intencion}")
-        } else {
-            reproducirTexto("No entendí bien.")
-        }
-    }
-
-    private fun reproducirTexto(texto: String) {
-        utteranceCounter++
-        tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null, "utt-$utteranceCounter")
-    }
-
-    private fun normalize(text: String): String {
-        var s = text.lowercase(Locale.getDefault()).trim()
-        s = Normalizer.normalize(s, Normalizer.Form.NFD)
-            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
-        s = s.replace(Regex("[^\\p{L}\\p{N}\\s]"), " ").replace(Regex("\\s+"), " ")
-        return s
-    }
-
-    private fun matchesCommand(text: String, comando: Comando): Boolean {
-        val normText = normalize(text)
-        return comando.entrada.split("|").any { variant ->
-            val normVar = normalize(variant)
-            val tokens = normVar.split(" ").filter { it.isNotBlank() }
-            tokens.all { token -> normText.contains(token) }
-        }
-    }
-
-    fun speakOrientation(
-        result: OrientationResult,
-        minIntervalMs: Long = 1500L,
-        minConfidence: Float = 0.25f
-    ) {
-        if (result.confidence < minConfidence) return
-
-        val key = "${result.label}:${result.position}:${result.distance}"
-        val now = System.currentTimeMillis()
-        if (key == lastGuideKey && now - lastGuideAtMs < minIntervalMs) return
-
-        val pos = when (result.position) {
-            Position.IZQUIERDA -> "izquierda"
-            Position.CENTRO_IZQUIERDA -> "centro izquierda"
-            Position.CENTRO -> "al centro"
-            Position.CENTRO_DERECHA -> "centro derecha"
-            Position.DERECHA -> "derecha"
-        }
-        val dist = when (result.distance) {
-            Distance.CERCA -> "cerca"
-            Distance.MEDIO -> "a media distancia"
-            Distance.LEJOS -> "lejos"
-        }
-        val confPct = (result.confidence * 100).toInt()
-        val texto = "${result.label} $pos, $dist, $confPct por ciento."
-
-        reproducirTexto(texto) // usa tu TTS existente
-        uiState.value = uiState.value.copy(assistantResponse = texto)
-
-        lastGuideKey = key
-        lastGuideAtMs = now
-    }
-}
-
-
-/* ------------------- Main Activity ------------------- */
+/* ------------------- Main Activity con navegación ------------------- */
 
 class MainActivity : ComponentActivity() {
     private val asistenteViewModel: AsistenteViewModel by viewModels()
@@ -244,12 +87,22 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            val context = LocalContext.current
-            val visionModule = remember { VisionModule() } // ✅ crea instancia real
+            val visionModule = remember { VisionModule() }
+            val nav = rememberNavController()
+            val navToCam by asistenteViewModel.navigateToCamera
+
+            LaunchedEffect(navToCam) {
+                if (navToCam) {
+                    asistenteViewModel.stopListening()
+                    asistenteViewModel.setVisionMode(true)   // << activar modo visión
+                    asistenteViewModel.navigateToCamera.value = false
+                    nav.navigate("performance_test")
+                }
+            }
 
             MaterialTheme {
-                val nav = rememberNavController()
                 NavHost(navController = nav, startDestination = "home") {
+
                     composable("home") {
                         HomeScreen(
                             onAlert = { nav.navigate("alert") },
@@ -260,28 +113,63 @@ class MainActivity : ComponentActivity() {
                             asistenteViewModel = asistenteViewModel
                         )
                     }
+
+                    // ALERTA (usa tu AlertScreen real)
                     composable("alert") {
-                        SimpleScreen("Alerta", "Pantalla de alerta") { nav.popBackStack() }
+                        AlertScreen(
+                            onBack = { nav.popBackStack() },
+                            phone = "56912345678",                 // reemplaza por tu estado si ya lo tienes
+                            message = "Necesito ayuda.",
+                            option = "opt2",
+                            onDialContact = { /* llama a tu dial() */ },
+                            onDialServices = { /* dial("133") */ },
+                            onSendSms = { /* sms(phone, message) */ },
+                            onQuickSms = { quick -> /* sms(phone, quick) */ }
+                        )
                     }
+
+                    // CONFIGURACIÓN (usa tu SettingsScreen real)
                     composable("settings") {
-                        SimpleScreen("Configuración", "Pantalla de configuración") { nav.popBackStack() }
+                        SettingsScreen(
+                            onBack = { nav.popBackStack() },
+                            initialPhone = "56912345678",
+                            initialMessage = "Necesito ayuda.",
+                            initialOption = "opt2",
+                            initialLargeText = true,
+                            initialTts = true,
+                            initialVibration = true,
+                            onSave = { phone, msg, opt, big, tts, vib ->
+                                // guarda en tu estado si corresponde
+                            },
+                            onTestDial = { /* dial("133") */ },
+                            onTestSms = { phone, msg -> /* sms(phone, msg) */ }
+                        )
                     }
+
+                    //  AYUDA (usa tu HelpScreen real)
                     composable("help") {
-                        SimpleScreen("Ayuda", "Pantalla de ayuda") { nav.popBackStack() }
+                        HelpScreen(onBack = { nav.popBackStack() })
                     }
+
+                    // CÁMARA
                     composable("performance_test") {
                         PerformanceTestScreen(
                             visionModule = visionModule,
-                            asistenteViewModel = asistenteViewModel
+                            asistenteViewModel = asistenteViewModel,
+                            onStopped = {
+                                asistenteViewModel.setVisionMode(false)
+                                nav.popBackStack()
+                            }
                         )
                     }
                 }
+
             }
         }
     }
 }
 
-/* ------------------- Home Screen ------------------- */
+/* ------------------- UI Home + componentes ------------------- */
 
 @Composable
 fun HomeScreen(
@@ -298,7 +186,7 @@ fun HomeScreen(
     val pillRed = Color(0xFFC62828)
     val context = LocalContext.current
 
-    // Permiso de micrófono
+    // Permiso micrófono
     var hasMicPerm by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
@@ -312,12 +200,15 @@ fun HomeScreen(
     ) { granted ->
         hasMicPerm = granted
         if (granted) onMicRequested()
+        else Toast.makeText(context, "Permiso de micrófono denegado", Toast.LENGTH_SHORT).show()
     }
 
     fun handleMicClick() {
         if (hasMicPerm) onMicRequested()
         else micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
     }
+
+    val ui by asistenteViewModel.uiState
 
     BoxWithConstraints(
         modifier = Modifier
@@ -332,7 +223,9 @@ fun HomeScreen(
             Text("AIMES", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(30.dp))
 
-            PillButton("⚠ Alerta", pillRed, Modifier.fillMaxWidth().height(90.dp)) { onAlert() }
+            PillButton("⚠ Alerta", pillRed, Modifier
+                .fillMaxWidth()
+                .height(90.dp)) { onAlert() }
             Spacer(Modifier.height(40.dp))
 
             CircleAction(circleSize, micYellow, Icons.Filled.Mic, "Micrófono", Color.Black) {
@@ -341,7 +234,7 @@ fun HomeScreen(
 
             Spacer(Modifier.height(40.dp))
 
-            CircleAction(circleSize, camWhite, Icons.Filled.CameraAlt, "Capturar", Color.Black) {
+            CircleAction(circleSize,camWhite,Icons.Filled.CameraAlt,"capturar",Color.Black) {
                 onCamera()
             }
 
@@ -349,23 +242,25 @@ fun HomeScreen(
             BottomBar(onSettings, onHelp, 40.dp)
         }
     }
-}
 
-/* ------------------- Reusables ------------------- */
-
-@Composable
-fun PillButton(text: String, color: Color, modifier: Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(50))
-            .background(color)
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
-    ) {
-        Text(text, color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+    // Diálogo mientras escucha + visualizador de audio
+    if (ui.isListening) {
+        AlertDialog(
+            onDismissRequest = { /* no cerrar */ },
+            title = { Text("Asistente AIMES") },
+            text = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                    MicVisualizer(rmsDb = ui.micRmsDb)
+                    Spacer(Modifier.height(16.dp))
+                    Text(ui.recognizedText, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { asistenteViewModel.stopListening() }) { Text("Detener") }
+            }
+        )
     }
 }
-
 @Composable
 fun CircleAction(
     size: Dp,
@@ -412,8 +307,6 @@ fun BottomBar(onSettings: () -> Unit, onHelp: () -> Unit, iconSize: Dp) {
     }
 }
 
-/* ------------------- Simple placeholder ------------------- */
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SimpleScreen(title: String, text: String, onBack: () -> Unit) {
@@ -430,6 +323,620 @@ fun SimpleScreen(title: String, text: String, onBack: () -> Unit) {
     ) { inner ->
         Box(Modifier.fillMaxSize().padding(inner), contentAlignment = Alignment.Center) {
             Text(text, color = Color.White)
+        }
+    }
+}
+
+/* ------------------- Visualizador de micrófono ------------------- */
+
+@Composable
+fun MicVisualizer(rmsDb: Float, modifier: Modifier = Modifier) {
+    // rms típico ~ [-2, 12]; normalizamos a [0,1]
+    val normalized = ((rmsDb - (-2f)) / (12f - (-2f))).coerceIn(0f, 1f)
+    val animatedRadius by animateFloatAsState(targetValue = normalized, label = "micRadius")
+
+    Canvas(modifier = modifier.size(80.dp)) {
+        val maxR = size.width / 2
+        drawCircle(brush = SolidColor(Color.Gray), radius = maxR, style = Stroke(width = 1.dp.toPx()))
+        drawCircle(brush = SolidColor(Color(0xFF1E88E5)), radius = maxR * animatedRadius)
+    }
+}
+
+/* ------------------ ALERTA (usa opción/phone/mensaje) ------------------ */
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AlertScreen(
+    onBack: () -> Unit,
+    phone: String,
+    message: String,
+    option: String,
+    onDialContact: () -> Unit,
+    onDialServices: () -> Unit,
+    onSendSms: () -> Unit,
+    onQuickSms: (String) -> Unit
+) {
+    val bg = Color(0xFF0B0B0B)
+    val txt = Color(0xFFEFEFEF)
+
+    Scaffold(
+        containerColor = bg,
+        topBar = {
+            TopAppBar(
+                title = { Text("Llamada de emergencia", color = txt, fontSize = 22.sp) },
+                navigationIcon = {
+                    Text(
+                        "←",
+                        modifier = Modifier
+                            .padding(start = 16.dp)
+                            .clickable(onClick = onBack),
+                        color = txt,
+                        fontSize = 24.sp
+                    )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF111111))
+            )
+        }
+    ) { inner ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner)
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+
+            when (option) {
+
+                /* ---------------- Opción 1 ----------------
+                   – Pastilla con NOMBRE del contacto arriba
+                   – Mensaje “Necesito ayuda [ubicación]” y estado “Enviando…”
+                */
+                "opt1" -> {
+                    BigPill(text = "CONTACTO", onClick = onDialContact) // si conoces el nombre, colócalo aquí
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "“Necesito ayuda”  [ubicación]",
+                        color = txt,
+                        fontSize = 22.sp,
+                        lineHeight = 28.sp
+                    )
+                    Text("Enviando…", color = txt.copy(alpha = 0.8f), fontSize = 18.sp)
+                    Spacer(Modifier.height(10.dp))
+                    BigHintCard("Mensaje configurado:", message)
+                }
+
+                /* ---------------- Opción 2 ----------------
+                   – Dos pastillas enormes: CONTACTO y SERVICIOS
+                */
+                "opt2" -> {
+                    BigPill(text = "CONTACTO", onClick = onDialContact)
+                    BigPill(text = "SERVICIOS (133)", onClick = onDialServices)
+                    BigHintCard("Mensaje configurado:", message)
+                }
+
+                /* ---------------- Opción 3 ----------------
+                   – Lista de mensajes grandes (como tarjetas) + Agregar (+) placeholder
+                */
+                "opt3" -> {
+                    Text("Mensajes:", color = txt, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                    BigMsgCard("Necesito orientación para llegar a mi destino.") { onQuickSms(it) }
+                    BigMsgCard("Estoy en un lugar que no reconozco.") { onQuickSms(it) }
+                    BigMsgAdd(onClick = { /* TODO: agregar mensaje personalizado */ })
+                }
+
+                /* ---------------- Opción 4 ----------------
+                   – CONTACTO / SERVICIOS + botón MENSAJE aparte (como tu diseño)
+                */
+                "opt4" -> {
+                    BigPill(text = "CONTACTO", onClick = onDialContact)
+                    BigPill(text = "SERVICIOS (133)", onClick = onDialServices)
+                    BigBoxButton(text = "MENSAJE", onClick = onSendSms)
+                }
+
+                else -> {
+                    Text("Selecciona un diseño en Configuración.", color = txt)
+                }
+            }
+        }
+    }
+}
+
+/* ------------------ SETTINGS (real) ------------------ */
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(
+    onBack: () -> Unit,
+    initialPhone: String,
+    initialMessage: String,
+    initialOption: String,
+    initialLargeText: Boolean,
+    initialTts: Boolean,
+    initialVibration: Boolean,
+    onSave: (phone: String, message: String, option: String, large: Boolean, tts: Boolean, vib: Boolean) -> Unit,
+    onTestDial: () -> Unit,
+    onTestSms: (phone: String, message: String) -> Unit
+) {
+    val bg = Color(0xFF0B0B0B)
+    val txt = Color(0xFFEFEFEF)
+    val card = Color(0xFF121212)
+    val haptics = LocalHapticFeedback.current
+
+    var phone by rememberSaveable { mutableStateOf(initialPhone) }
+    var message by rememberSaveable { mutableStateOf(initialMessage) }
+    var option by rememberSaveable { mutableStateOf(initialOption) }
+    var large by rememberSaveable { mutableStateOf(initialLargeText) }
+    var tts by rememberSaveable { mutableStateOf(initialTts) }
+    var vib by rememberSaveable { mutableStateOf(initialVibration) }
+
+    Scaffold(
+        containerColor = bg,
+        topBar = {
+            TopAppBar(
+                title = { Text("Configuración", color = txt) },
+                navigationIcon = {
+                    Text(
+                        "←",
+                        modifier = Modifier
+                            .padding(start = 16.dp)
+                            .clickable(onClick = onBack),
+                        color = txt,
+                        fontSize = 22.sp
+                    )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF0F0F0F))
+            )
+        }
+    ) { inner ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+
+            SectionCard(title = "Accesibilidad", card = card, txt = txt) {
+                SettingSwitch(
+                    label = "Texto grande",
+                    checked = large,
+                    onCheckedChange = { large = it; if (vib && it) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) },
+                    txt = txt
+                )
+                SettingSwitch(
+                    label = "Lectura en voz (placeholder)",
+                    checked = tts,
+                    onCheckedChange = { tts = it; if (vib && it) haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
+                    txt = txt
+                )
+                SettingSwitch(
+                    label = "Vibración (placeholder)",
+                    checked = vib,
+                    onCheckedChange = { vib = it; if (it) haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
+                    txt = txt
+                )
+            }
+
+            SectionCard(title = "Contacto de emergencia", card = card, txt = txt) {
+                OutlinedTextField(
+                    value = phone,
+                    onValueChange = { phone = it.filter { ch -> ch.isDigit() } },
+                    label = { Text("Teléfono", color = txt.copy(alpha = 0.8f)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = darkFieldColors(),
+                    textStyle = LocalTextStyle.current.copy(color = txt),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = message,
+                    onValueChange = { message = it },
+                    label = { Text("Mensaje", color = txt.copy(alpha = 0.8f)) },
+                    singleLine = false,
+                    minLines = 2,
+                    colors = darkFieldColors(),
+                    textStyle = LocalTextStyle.current.copy(color = txt),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            SectionCard(title = "Diseño de emergencia (elige uno)", card = card, txt = txt) {
+                RadioRow("Opción 1", option == "opt1", txt) { option = "opt1" }
+                RadioRow("Opción 2", option == "opt2", txt) { option = "opt2" }
+                RadioRow("Opción 3", option == "opt3", txt) { option = "opt3" }
+                RadioRow("Opción 4", option == "opt4", txt) { option = "opt4" }
+            }
+
+            SectionCard(title = "Probar acciones", card = card, txt = txt) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FilledTonalButton(
+                        onClick = onTestDial,
+                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF263238))
+                    ) { Text("Llamar 133", color = txt) }
+                    FilledTonalButton(
+                        onClick = { onTestSms(phone, message) },
+                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF263238))
+                    ) { Text("Enviar SMS", color = txt) }
+                }
+            }
+
+            Button(
+                onClick = { onSave(phone, message, option, large, tts, vib) },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E88E5))
+            ) { Text("Guardar", color = Color.White, fontWeight = FontWeight.SemiBold) }
+
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+/* ------------------ HELP (simple, fondo negro) ------------------ */
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HelpScreen(onBack: () -> Unit) {
+    val bg = Color(0xFF0B0B0B)
+    val txt = Color(0xFFEFEFEF)
+    val context = LocalContext.current
+
+    val instructions = """
+        Instrucciones de uso:
+
+        • Botón Alerta: parte superior de la pantalla, color rojo.
+          Presiónalo para iniciar acciones de emergencia.
+
+        • Micrófono: centro de la pantalla, botón circular amarillo.
+          Actívalo para describir o guiar con la voz.
+
+        • Capturar: debajo del micrófono, botón circular blanco.
+          Úsalo para tomar una foto y describir la escena.
+
+        • Configuración: parte inferior izquierda (icono ⚙, gris).
+          Edita número de emergencia, mensajes y opciones.
+
+        • Instrucciones: parte inferior derecha (icono ℹ, gris).
+          Muestra esta misma pantalla.
+
+        Consejos:
+        • Mantén tu teléfono cargado y con datos o llamada habilitada.
+        • Verifica que el número de emergencia esté configurado.
+    """.trimIndent()
+
+    var isSpeaking by remember { mutableStateOf(false) }
+    var ttsRef by remember { mutableStateOf<TextToSpeech?>(null) }
+
+    DisposableEffect(context) {
+        var engine: TextToSpeech? = null
+        engine = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                engine?.language = Locale("es", "CL")
+            }
+        }
+        ttsRef = engine
+        onDispose {
+            isSpeaking = false
+            engine?.stop(); engine?.shutdown()
+            ttsRef = null
+        }
+    }
+
+    fun speakAll() {
+        ttsRef?.speak(instructions, TextToSpeech.QUEUE_FLUSH, null, "help-tts")
+        isSpeaking = true
+    }
+    fun stopSpeak() {
+        ttsRef?.stop()
+        isSpeaking = false
+    }
+
+    Scaffold(
+        containerColor = bg,
+        topBar = {
+            TopAppBar(
+                title = { Text("Instrucciones", color = txt, fontSize = 26.sp) },
+                navigationIcon = {
+                    Text("←",
+                        modifier = Modifier.padding(start = 16.dp).clickable(onClick = onBack),
+                        color = txt, fontSize = 24.sp)
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF111111))
+            )
+        }
+    ) { inner ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner)
+                .background(bg)
+                .padding(horizontal = 20.dp, vertical = 16.dp)
+        ) {
+            // Texto scrollable ocupa el espacio disponible
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    instructions,
+                    color = txt,
+                    fontSize = 20.sp,
+                    lineHeight = 26.sp
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // Botón grande fijo abajo
+            if (!isSpeaking) {
+                Button(
+                    onClick = { speakAll() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(80.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E88E5)),
+                    shape = RoundedCornerShape(40.dp)
+                ) {
+                    Text("🔊 Leer en voz alta", color = Color.White, fontSize = 22.sp)
+                }
+            } else {
+                OutlinedButton(
+                    onClick = { stopSpeak() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(80.dp),
+                    shape = RoundedCornerShape(40.dp)
+                ) {
+                    Text("⏹ Detener lectura", color = txt, fontSize = 22.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BigPill(
+    text: String,
+    onClick: () -> Unit,
+    bg: Color = Color(0xFF1F1F1F),
+    fg: Color = Color.White
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(88.dp)                     // alto grande
+            .clip(RoundedCornerShape(50))
+            .background(bg)
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = text },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = fg, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun BigBoxButton(
+    text: String,
+    onClick: () -> Unit,
+    bg: Color = Color(0xFF2B2B2B),
+    fg: Color = Color.White
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(96.dp)                     // caja muy grande
+            .clip(RoundedCornerShape(16.dp))
+            .background(bg)
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = text },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = fg, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun BigHintCard(title: String, body: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xFF121212))
+            .padding(16.dp)
+    ) {
+        Text(title, color = Color(0xFFBDBDBD), fontSize = 16.sp)
+        Spacer(Modifier.height(6.dp))
+        Text(body, color = Color.White, fontSize = 18.sp, lineHeight = 24.sp)
+    }
+}
+
+@Composable
+private fun BigMsgCard(text: String, onSend: (String) -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF141414))
+            .clickable(onClick = { onSend(text) })
+            .padding(18.dp)
+            .semantics { contentDescription = "Mensaje: $text" }
+    ) {
+        Text(text, color = Color.White, fontSize = 20.sp, lineHeight = 26.sp)
+        Spacer(Modifier.height(8.dp))
+        Text("Tocar para enviar", color = Color(0xFFB0BEC5), fontSize = 14.sp)
+    }
+}
+
+@Composable
+private fun BigMsgAdd(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(72.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF1E272E))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text("Agregar  +", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun SectionCard(
+    title: String,
+    card: Color,
+    txt: Color,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(card)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(title, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        content()
+    }
+}
+
+@Composable
+private fun SettingSwitch(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit, txt: Color) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, color = txt, fontSize = 16.sp)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun RadioRow(text: String, selected: Boolean, txt: Color, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Spacer(Modifier.width(8.dp))
+        Text(text, color = txt)
+    }
+}
+
+@Composable
+private fun darkFieldColors(): TextFieldColors = OutlinedTextFieldDefaults.colors(
+    focusedContainerColor = Color(0xFF1B1B1B),
+    unfocusedContainerColor = Color(0xFF161616),
+    disabledContainerColor = Color(0xFF161616),
+    cursorColor = Color.White,
+    focusedBorderColor = Color(0xFF2E7D32),
+    unfocusedBorderColor = Color(0xFF2C2C2C),
+    focusedTextColor = Color.White,
+    unfocusedTextColor = Color.White
+)
+
+@Composable
+private fun PillButton(
+    text: String,
+    containerColor: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(containerColor)
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = "Botón de alerta" },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            color = Color.White,
+            fontSize = 32.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun CircleAction(
+    size: Dp,
+    containerColor: Color,
+    icon: @Composable () -> Unit,
+    label: String,
+    labelColor: Color,
+    labelSizeSp: Int = 18,
+    onClick: () -> Unit
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(containerColor)
+                .clickable(onClick = onClick)
+                .semantics { contentDescription = label },
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                icon()
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    label,
+                    color = labelColor,
+                    fontSize = labelSizeSp.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BottomBar(
+    modifier: Modifier = Modifier,
+    height: Dp,
+    onSettings: () -> Unit,
+    onHelp: () -> Unit,
+    iconSize: Dp = 36.dp
+) {
+    Box(
+        modifier = modifier
+            .height(height)
+            .background(Color(0xFF0F0F0F))
+            .padding(horizontal = 18.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onSettings) {
+                Icon(
+                    Icons.Filled.Settings,
+                    contentDescription = "Configuración",
+                    tint = Color(0xFFE0E0E0),
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = onHelp) {
+                Icon(
+                    Icons.Filled.Info,
+                    contentDescription = "Instrucciones",
+                    tint = Color(0xFFE0E0E0),
+                    modifier = Modifier.size(iconSize)
+                )
+            }
         }
     }
 }

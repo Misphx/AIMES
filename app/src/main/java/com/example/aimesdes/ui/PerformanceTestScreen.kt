@@ -30,16 +30,16 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.core.content.ContextCompat
 
 // importa tu ViewModel (está declarado en el mismo package com.example.aimesdes)
-import com.example.aimesdes.AsistenteViewModel
+import com.example.aimesdes.AsistenteViewModel.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PerformanceTestScreen(
     visionModule: VisionModule,
     asistenteViewModel: AsistenteViewModel,   // <<--- ViewModel para TTS
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onStopped: () -> Unit
 ) {
-    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
     // Estado visión
@@ -53,6 +53,20 @@ fun PerformanceTestScreen(
 
     // Orientación
     val orientation = remember { OrientationModule(targetLabel = null) } // p.ej. "entrada"
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        try {
+            val labels = context.assets.open("labels.txt")
+                .bufferedReader(Charsets.UTF_8)
+                .readLines()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            orientation.setLabels(labels)
+        } catch (e: Exception) {
+            // si falla, seguirá usando los labels tal como vienen (objN o nombre)
+        }
+    }
     var orientResults by remember { mutableStateOf<List<OrientationResult>>(emptyList()) }
     var bestOrient by remember { mutableStateOf<OrientationResult?>(null) }
 
@@ -166,6 +180,7 @@ fun PerformanceTestScreen(
                         if (isRunning) {
                             visionModule.stopCamera()
                             isRunning = false
+                            onStopped()
                         } else {
                             if (!hasCameraPerm) {
                                 cameraPermLauncher.launch(android.Manifest.permission.CAMERA)

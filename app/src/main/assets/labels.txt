@@ -1,0 +1,13 @@
+ascensor
+entrada
+escalera_meca
+escalera_norm
+estacion
+podo_circulo
+podo_linea
+senales_amarillas
+senales_azules
+senales_cafes
+senales_rojas
+senales_rosas
+senales_verdes
