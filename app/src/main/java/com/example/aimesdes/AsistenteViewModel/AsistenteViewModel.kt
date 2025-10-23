@@ -291,6 +291,7 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
         // 3) Nada entendido
         reproducirTexto("No entendí bien. Presiona de nuevo para hablar.")
         uiState.value = uiState.value.copy(assistantResponse = "No entendí bien.")
+        pendingNavToCamera = false
         stopListening()
     }
 
@@ -319,8 +320,10 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
 
         reproducirTexto(respuesta)
         uiState.value = uiState.value.copy(assistantResponse = respuesta)
-        if (intencion != "cancelar") {
+        if (intencion in listOf("buscar_objeto", "destino_estacion", "activar_guiado")) {
             pendingNavToCamera = true
+        } else {
+            pendingNavToCamera = false      // cualquier otra NO navega
         }
     }
 
