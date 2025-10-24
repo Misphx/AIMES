@@ -16,32 +16,28 @@ data class OrientationResult(
     val distanceMeters: Float? = null
 )
 
-class OrientationModule(
-    var targetLabel: String? = null
+class OrientationEngine(
+    private var focalLengthPx: Float = 1150f,
+    private var knownObjectHeightMeters: Float? = null
 ) {
-    // --- CONSTANTES A CALIBRAR ---
-    private val FOCAL_LENGTH_PIXELS = 800f
-    private val KNOWN_OBJECT_HEIGHT_METERS = 1.7f
-    private val CAMERA_HEIGHT_METERS = 1.6f
-
-    // Constante de calibración POV (se puede medir empíricamente una vez)
-    private var povConstantK = 480f // ejemplo inicial, ajustable en campo
-
-    private val nearTh = 0.45f
-    private val midTh  = 0.25f
+    var povK: Float = 520f
+    var nearMeters: Float = 1.2f
+    var midMeters:  Float = 2.5f
+    var smoothingAlpha: Float = 0.35f
+    var targetLabel: String? = null
 
     private var labelNames: List<String> = emptyList()
     fun setLabels(names: List<String>) { labelNames = names }
 
+    private data class EmaState(var v: Float, var ready: Boolean)
+    private val emaByKey = mutableMapOf<String, EmaState>()
+
     private val objIdxRegex = Regex("""^obj(\d+)$""")
     private fun resolveLabel(raw: String): String {
-        // obj3 -> labels[3]; si no hay match, devuelve tal cual
         val m = objIdxRegex.matchEntire(raw)
         if (m != null) {
             val idx = m.groupValues[1].toIntOrNull()
-            if (idx != null && idx in labelNames.indices) {
-                return labelNames[idx]
-            }
+            if (idx != null && idx in labelNames.indices) return labelNames[idx]
         }
         return raw
     }
@@ -58,129 +54,124 @@ class OrientationModule(
         }
     }
 
-    private fun mapDistance(boxH: Float, frameH: Int): Distance {
-        val rel = if (frameH > 0) boxH / frameH.toFloat() else 0f
+    private fun metersToBucket(dMeters: Float?): Distance {
+        if (dMeters == null || dMeters.isNaN() || dMeters.isInfinite()) return Distance.LEJOS
         return when {
-            rel >= nearTh -> Distance.CERCA
-            rel >= midTh  -> Distance.MEDIO
-            else          -> Distance.LEJOS
+            dMeters < nearMeters -> Distance.CERCA
+            dMeters < midMeters  -> Distance.MEDIO
+            else                 -> Distance.LEJOS
         }
     }
 
-    /** Método clásico pinhole. */
-    private fun estimateDistanceMeters(boxHeightPixels: Float): Float? {
-        if (boxHeightPixels <= 0) return null
-        return (KNOWN_OBJECT_HEIGHT_METERS * FOCAL_LENGTH_PIXELS) / boxHeightPixels
+    private fun relBoxToBucket(hPx: Float, frameH: Int): Distance {
+        val rel = if (frameH > 0) hPx / frameH.toFloat() else 0f
+        return when {
+            rel >= 0.45f -> Distance.CERCA
+            rel >= 0.25f -> Distance.MEDIO
+            else         -> Distance.LEJOS
+        }
     }
 
-    /** Corrección angular horizontal. */
-    private fun applyAngularCorrection(rawDistance: Float, boxCenterX: Float, frameW: Int): Float {
+    private fun estimateDistanceMetersByPinhole(boxHeightPixels: Float): Float? {
+        val h = knownObjectHeightMeters ?: return null
+        if (boxHeightPixels <= 0f) return null
+        return (h * focalLengthPx) / boxHeightPixels
+    }
+
+    private fun applyAngularCorrection(rawD: Float?, boxCenterX: Float, frameW: Int): Float? {
+        if (rawD == null) return null
         val offsetX = boxCenterX - (frameW / 2f)
-        val theta = atan(offsetX / FOCAL_LENGTH_PIXELS)
-        return rawDistance * cos(theta)
+        val theta = atan(offsetX / focalLengthPx)
+        return rawD * cos(theta)
     }
 
-    /** --- NUEVO ---: Estimación por perspectiva vertical (POV fijo en parte inferior). */
-    private fun estimateDistancePOV(boxBottomY: Float, frameH: Int): Float? {
+    private fun estimateDistanceMetersByPOV(boxBottomY: Float, frameH: Int): Float? {
         val dy = (frameH - boxBottomY)
-        if (dy <= 0) return null
-        return povConstantK / dy
+        if (dy <= 0f) return null
+        return povK / dy
     }
 
-    /** Permite calibrar la constante POV automáticamente. */
-    fun calibratePOV(frameH: Int, knownDistanceMeters: Float, objectBaseY: Float) {
-        val dy = (frameH - objectBaseY)
-        if (dy > 0) povConstantK = knownDistanceMeters * dy
+    private fun ema(key: String, x: Float): Float {
+        val s = emaByKey.getOrPut(key) { EmaState(x, false) }
+        if (!s.ready) { s.v = x; s.ready = true; return s.v }
+        s.v = smoothingAlpha * x + (1f - smoothingAlpha) * s.v
+        return s.v
     }
 
-    /** Fusión ponderada. */
-    private fun fuseDistances(d1: Float?, d2: Float?): Float? {
-        if (d1 == null && d2 == null) return null
-        if (d1 == null) return d2
-        if (d2 == null) return d1
-        return 0.5f * d1 + 0.5f * d2
-    }
+    fun toResults(detections: List<Detection>, frameW: Int, frameH: Int): List<OrientationResult> {
+        return detections.mapNotNull { det ->
+            val labelResolved = resolveLabel(det.label)
+            val labelHuman = humanize(labelResolved)
 
-    /** Análisis principal. */
-    fun analyze(
-        detections: List<Detection>,
-        frameW: Int,
-        frameH: Int
-    ): List<OrientationResult> {
-        if (detections.isEmpty()) return emptyList()
-
-        return detections.map { det ->
-            val cx = (det.box.left + det.box.right) / 2f
+            val cx = det.box.centerX()
+            val h  = det.box.height()
             val pos = mapPosition(cx, frameW)
-            val distCat = mapDistance(det.box.height(), frameH)
 
-            val dPinhole = estimateDistanceMeters(det.box.height())
-            val dPOV = estimateDistancePOV(det.box.bottom, frameH)
-            val dFused = fuseDistances(dPinhole, dPOV)
-            val dFinal = dFused?.let { applyAngularCorrection(it, cx, frameW) }
-            val PLabel = humanize(resolveLabel(det.label))
+            val dPinhole = estimateDistanceMetersByPinhole(h)
+            val dPinholeCorr = applyAngularCorrection(dPinhole, cx, frameW)
+            val dPOV = estimateDistanceMetersByPOV(det.box.bottom, frameH)
+            val dMetersRaw = dPinholeCorr ?: dPOV
+
+            val key = "${labelResolved}|${pos.name}"
+            val dMeters = dMetersRaw?.let { ema(key, it) }
+
+            val distCat = if (dMeters != null) metersToBucket(dMeters) else relBoxToBucket(h, frameH)
 
             OrientationResult(
-                label = PLabel,
+                label = labelHuman,
                 confidence = det.score,
                 position = pos,
                 distance = distCat,
                 box = det.box,
-                distanceMeters = dFinal
+                distanceMeters = dMeters
             )
         }
     }
 
+    fun selectBest(results: List<OrientationResult>): OrientationResult? {
+        if (results.isEmpty()) return null
+        val target = targetLabel?.lowercase()?.trim()
+        val subset = if (!target.isNullOrEmpty()) {
+            results.filter { it.label.lowercase() == target }
+                .ifEmpty { return null } // si hay objetivo definido, no devolvemos otros
+        } else results
+
+        return subset.minBy { distanceScore(it) }
+    }
+
     private fun distanceScore(r: OrientationResult): Float {
-        // Score menor = más prioritario (más cerca)
         val bucket = when (r.distance) {
             Distance.CERCA -> 0f
             Distance.MEDIO -> 1f
             Distance.LEJOS -> 2f
         }
         val metersPart = r.distanceMeters ?: Float.POSITIVE_INFINITY
-        // Si tenemos metros, prioriza por metros; si no, por bucket. Empate: mayor confianza.
         return if (r.distanceMeters != null)
             metersPart - r.confidence * 0.01f
         else
             bucket - r.confidence * 0.01f
     }
-    fun selectBest(results: List<OrientationResult>): OrientationResult? {
-        if (results.isEmpty()) return null
 
-        val target = targetLabel?.lowercase()?.trim()
-        val subset = if (!target.isNullOrEmpty()) {
-            results.filter { it.label.lowercase().trim() == target }
-        } else results
-
-        return subset.minByOrNull { distanceScore(it) }
-    }
-
-    fun formatTts(result: OrientationResult): String {
-        val nombre = result.label.ifBlank { "objeto" }
+    fun formatForSpeech(result: OrientationResult): String {
         val pos = when (result.position) {
             Position.IZQUIERDA -> "a la izquierda"
-            Position.CENTRO_IZQUIERDA -> "al centro izquierda"
-            Position.CENTRO -> "al centro"
-            Position.CENTRO_DERECHA -> "al centro derecha"
+            Position.CENTRO_IZQUIERDA -> "a la izquierda"
+            Position.CENTRO -> "al frente"
+            Position.CENTRO_DERECHA -> "a la derecha"
             Position.DERECHA -> "a la derecha"
         }
-
-        val distTxt = if (result.distanceMeters != null) {
-            val d = result.distanceMeters
+        val distTxt = result.distanceMeters?.let { d ->
             when {
-                d < 0.8f -> "a menos de un metro"
-                d < 2.0f -> "a unos ${"%.1f".format(d)} metros"
-                else -> "a aproximadamente ${d.roundToInt()} metros"
+                d < 1.0f -> "muy cerca (${String.format("%.1f", d)} m)"
+                d < 2.0f -> "cerca (${String.format("%.1f", d)} m)"
+                d < 4.0f -> "a media distancia (${String.format("%.1f", d)} m)"
+                else     -> "lejos (${String.format("%.0f", d)} m)"
             }
-        } else {
-            when (result.distance) {
-                Distance.CERCA -> "cerca"
-                Distance.MEDIO -> "a media distancia"
-                Distance.LEJOS -> "lejos"
-            }
+        } ?: when (result.distance) {
+            Distance.CERCA -> "cerca"
+            Distance.MEDIO -> "a media distancia"
+            Distance.LEJOS -> "lejos"
         }
-
-        return "$nombre $pos, $distTxt."
+        return "${result.label} $pos, $distTxt."
     }
 }

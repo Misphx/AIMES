@@ -1,5 +1,10 @@
 package com.example.aimesdes.ui
 
+import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.view.ViewGroup
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
@@ -14,211 +19,279 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleOwner
+import com.example.aimesdes.orientation.Distance
+import com.example.aimesdes.orientation.OrientationEngine
+import com.example.aimesdes.orientation.OrientationResult
+import com.example.aimesdes.orientation.Position
 import com.example.aimesdes.vision.Detection
 import com.example.aimesdes.vision.VisionModule
-import com.example.aimesdes.orientation.*
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.core.content.ContextCompat
-
-// importa tu ViewModel (está declarado en el mismo package com.example.aimesdes)
-import com.example.aimesdes.AsistenteViewModel.*
+import com.example.aimesdes.AsistenteViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PerformanceTestScreen(
+    asistenteViewModel: AsistenteViewModel,
     visionModule: VisionModule,
-    asistenteViewModel: AsistenteViewModel,   // <<--- ViewModel para TTS
-    modifier: Modifier = Modifier,
-    onStopped: () -> Unit
+    lifecycleOwner: LifecycleOwner
 ) {
-    val lifecycleOwner = LocalLifecycleOwner.current
+    val context = LocalContext.current
+    val density = LocalDensity.current
 
-    // Estado visión
-    var isRunning by remember { mutableStateOf(false) }
-    var fps by remember { mutableStateOf(0f) }
-    var precision by remember { mutableStateOf(0f) }
-    var detections by remember { mutableStateOf<List<Detection>>(emptyList()) }
-
-    // PreviewView para CameraX
     var previewRef by remember { mutableStateOf<PreviewView?>(null) }
 
-    // Orientación
-    val orientation = remember { OrientationModule(targetLabel = null) } // p.ej. "entrada"
-    val context = LocalContext.current
+    var detections by remember { mutableStateOf<List<Detection>>(emptyList()) }
+    var orientResults by remember { mutableStateOf<List<OrientationResult>>(emptyList()) }
+    var bestOrient by remember { mutableStateOf<OrientationResult?>(null) }
+    var fps by remember { mutableStateOf(0f) }
+    var precision by remember { mutableStateOf(0f) }
+
+    val orientationEngine = remember { OrientationEngine() }
 
     LaunchedEffect(Unit) {
         try {
             val labels = context.assets.open("labels.txt")
-                .bufferedReader(Charsets.UTF_8)
-                .readLines()
+                .bufferedReader().readLines()
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
-            orientation.setLabels(labels)
-        } catch (e: Exception) {
-            // si falla, seguirá usando los labels tal como vienen (objN o nombre)
+            orientationEngine.setLabels(labels)
+        } catch (_: Exception) {}
+    }
+
+    // --- Micrófono propio del Test (independiente del de Main) ---
+    val testSrRef = remember { mutableStateOf<SpeechRecognizer?>(null) }
+
+    fun startTestMic() {
+        val sr = testSrRef.value ?: SpeechRecognizer.createSpeechRecognizer(context).also { testSrRef.value = it }
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-CL")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        }
+        sr.setRecognitionListener(object : RecognitionListener {
+            override fun onResults(results: Bundle) {
+                results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.let { asistenteViewModel.procesarComando(it) }
+                try { sr.startListening(intent) } catch (_: Exception) {}
+            }
+            override fun onPartialResults(results: Bundle) {}
+            override fun onError(error: Int) { try { sr.startListening(intent) } catch (_: Exception) {} }
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        try { sr.startListening(intent) } catch (_: Exception) {}
+    }
+
+    fun stopTestMic() {
+        try { testSrRef.value?.stopListening() } catch (_: Exception) {}
+    }
+
+    fun destroyTestMic() {
+        try { testSrRef.value?.stopListening() } catch (_: Exception) {}
+        try { testSrRef.value?.destroy() } catch (_: Exception) {}
+        testSrRef.value = null
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try { stopTestMic() } catch (_: Exception) {}
+            try { destroyTestMic() } catch (_: Exception) {}
+            try { visionModule.stopCamera() } catch (_: Exception) {}
         }
     }
-    var orientResults by remember { mutableStateOf<List<OrientationResult>>(emptyList()) }
-    var bestOrient by remember { mutableStateOf<OrientationResult?>(null) }
 
-    // Permiso de cámara
-    val hasCameraPermInit = ContextCompat.checkSelfPermission(
-        context, android.Manifest.permission.CAMERA
-    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-    var hasCameraPerm by remember { mutableStateOf(hasCameraPermInit) }
+    // --- Controles UI ---
+    var voiceOn by remember { mutableStateOf(true) }
+    var targetText by remember { mutableStateOf("") }
+    var povK by remember { mutableStateOf(520f) }
+    var nearM by remember { mutableStateOf(1.2f) }
+    var midM by remember { mutableStateOf(2.5f) }
 
-    val cameraPermLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasCameraPerm = granted
-        if (granted) {
-            val pv = previewRef
-            if (pv != null) {
-                visionModule.startCamera(
-                    context = context,
-                    lifecycleOwner = lifecycleOwner,
-                    previewView = pv
-                ) { dets, newFps, newPrecision ->
-                    detections = dets
-                    fps = newFps
-                    precision = newPrecision
+    LaunchedEffect(voiceOn) { asistenteViewModel.setVoiceGuidance(voiceOn) }
+    LaunchedEffect(targetText) {
+        val t = targetText.lowercase().trim().ifBlank { null }
+        asistenteViewModel.setTargetLabel(t)
+        orientationEngine.targetLabel = t
+    }
+    LaunchedEffect(povK, nearM, midM) {
+        orientationEngine.povK = povK
+        orientationEngine.nearMeters = nearM
+        orientationEngine.midMeters = midM
+    }
 
-                    val w = previewRef?.width ?: 0
-                    val h = previewRef?.height ?: 0
-                    orientResults = orientation.analyze(dets, w, h)
-                    bestOrient = orientation.selectBest(orientResults)
+    var running by remember { mutableStateOf(false) }
 
-                    // TTS inmediato con anti-flood en el ViewModel
-                    bestOrient?.let { asistenteViewModel.speakOrientation(it) }
-                }
-                isRunning = true
+    fun startCamera() {
+        val pv = previewRef ?: return
+        startTestMic()
+
+        visionModule.startCamera(
+            context = context,
+            lifecycleOwner = lifecycleOwner,
+            previewView = pv
+        ) { dets, newFps, newPrecision ->
+            detections = dets
+            fps = newFps
+            precision = newPrecision
+
+            val w = pv.width
+            val h = pv.height
+
+            val orientList = orientationEngine.toResults(dets, w, h)
+            val best = orientationEngine.selectBest(orientList)
+
+            orientResults = orientList
+            bestOrient = best
+
+            if (voiceOn) {
+                best?.let { asistenteViewModel.speakOrientation(it) }
             }
         }
+        running = true
     }
 
-    // Al salir: apagar cámara
-    DisposableEffect(Unit) {
-        onDispose { visionModule.stopCamera() }
+    fun stopCamera() {
+        stopTestMic()
+        try { visionModule.stopCamera() } catch (_: Exception) {}
+        running = false
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Prueba de rendimiento de visión") },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF1E1E1E),
-                    titleContentColor = Color.White
-                )
+    // ===== UI =====
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .padding(12.dp)
+    ) {
+
+        // Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Prueba de Rendimiento / Orientación",
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
             )
-        },
-        modifier = modifier.fillMaxSize()
-    ) { paddingValues ->
+            AssistStats(fps = fps, precision = precision)
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // Preview + overlay
         Box(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
+                .fillMaxWidth()
+                .weight(1f)
+                .background(Color(0xFF101010), RoundedCornerShape(12.dp))
         ) {
-            // Vista de cámara
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    PreviewView(ctx).apply {
+                modifier = Modifier
+                    .fillMaxSize(),
+                factory = {
+                    PreviewView(it).apply {
+                        this.scaleType = PreviewView.ScaleType.FILL_CENTER
                         layoutParams = ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
                         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                        scaleType = PreviewView.ScaleType.FILL_CENTER
                         previewRef = this
                     }
                 }
             )
 
-            // Overlay con cajas y labels orientados
-            DetectionsOverlay(
+            // Overlay de cajas y etiquetas orientadas
+            DetectionOverlay(
+                detections = detections,
                 orientation = orientResults,
-                modelInputSize = 640
+                best = bestOrient
             )
+        }
 
-            // Panel inferior
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(Color(0x99000000))
-                    .padding(12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                val guide = bestOrient?.let { orientation.formatTts(it) } ?: "Buscando objetivo…"
-                Text(
-                    text = guide,
-                    color = Color.White,
-                    fontSize = 14.sp
-                )
+        Spacer(Modifier.height(10.dp))
 
-                Spacer(modifier = Modifier.height(6.dp))
+        // Panel de controles
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF151515))
+        ) {
+            Column(Modifier.padding(12.dp)) {
 
-                Text(
-                    text = "FPS: ${"%.2f".format(fps)}  |  Precisión: ${"%.1f".format(precision)}%",
-                    color = Color.White,
-                    fontSize = 14.sp
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Button(
-                    onClick = {
-                        if (isRunning) {
-                            visionModule.stopCamera()
-                            isRunning = false
-                            onStopped()
-                        } else {
-                            if (!hasCameraPerm) {
-                                cameraPermLauncher.launch(android.Manifest.permission.CAMERA)
-                            } else {
-                                val pv = previewRef
-                                if (pv != null) {
-                                    visionModule.startCamera(
-                                        context = context,
-                                        lifecycleOwner = lifecycleOwner,
-                                        previewView = pv
-                                    ) { dets, newFps, newPrecision ->
-                                        detections = dets
-                                        fps = newFps
-                                        precision = newPrecision
-
-                                        val w = previewRef?.width ?: 0
-                                        val h = previewRef?.height ?: 0
-                                        orientResults = orientation.analyze(dets, w, h)
-                                        bestOrient = orientation.selectBest(orientResults)
-
-                                        // TTS en botón start
-                                        bestOrient?.let { asistenteViewModel.speakOrientation(it) }
-                                    }
-                                    isRunning = true
-                                }
-                            }
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isRunning) Color.Red else Color(0xFF4CAF50)
-                    ),
-                    shape = RoundedCornerShape(10.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = if (isRunning) "Detener" else "Iniciar prueba",
-                        color = Color.White,
-                        fontSize = 16.sp
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(checked = voiceOn, onCheckedChange = { voiceOn = it })
+                        Spacer(Modifier.width(6.dp))
+                        Text("Guía por voz", color = Color.White)
+                    }
+
+                    OutlinedTextField(
+                        value = targetText,
+                        onValueChange = { targetText = it },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("Objetivo (ej: door, elevator)", color = Color.LightGray) },
+                        singleLine = true,
+                        textStyle = TextStyle(color = Color.White),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = Color(0x33000000),
+                            unfocusedContainerColor = Color(0x22000000),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
                     )
+
+                    if (!running) {
+                        Button(onClick = { startCamera() }) { Text("Iniciar") }
+                    } else {
+                        Button(onClick = { stopCamera() }) { Text("Detener") }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Column(Modifier.fillMaxWidth()) {
+                    Text("Calibración distancia (POV K = ${povK.toInt()})", color = Color.White, fontSize = 12.sp)
+                    Slider(
+                        value = povK,
+                        onValueChange = { povK = it },
+                        valueRange = 120f..2000f
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Cerca < ${"%.1f".format(nearM)} m", color = Color.White, fontSize = 12.sp)
+                            Slider(
+                                value = nearM,
+                                onValueChange = { v -> nearM = v.coerceIn(0.5f, 3.0f) },
+                                valueRange = 0.5f..3.0f
+                            )
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text("Medio < ${"%.1f".format(midM)} m", color = Color.White, fontSize = 12.sp)
+                            Slider(
+                                value = midM,
+                                onValueChange = { v -> midM = v.coerceIn(nearM + 0.2f, 5.0f) },
+                                valueRange = 1.0f..5.0f
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -226,100 +299,58 @@ fun PerformanceTestScreen(
 }
 
 @Composable
-private fun DetectionsOverlay(
-    orientation: List<OrientationResult>,
-    modelInputSize: Int = 640
-) {
-    val density = LocalDensity.current
-    var overlayW by remember { mutableStateOf(0) }
-    var overlayH by remember { mutableStateOf(0) }
-
-    // FILL_CENTER → escalar por el mayor factor y centrar
-    val scale = remember(overlayW, overlayH, modelInputSize) {
-        if (modelInputSize == 0) 1f else maxOf(
-            overlayW.toFloat() / modelInputSize,
-            overlayH.toFloat() / modelInputSize
-        )
-    }
-    val contentW = modelInputSize * scale
-    val contentH = modelInputSize * scale
-    val offsetX = (overlayW - contentW) / 2f
-    val offsetY = (overlayH - contentH) / 2f
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .onSizeChanged { s ->
-                overlayW = s.width
-                overlayH = s.height
-            }
+private fun AssistStats(fps: Float, precision: Float) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Rectángulos
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            // --- Cálculo de escalas y offsets ---
-            val overlayW = size.width
-            val overlayH = size.height
+        StatChip(label = "FPS", value = if (fps.isFinite()) "%.1f".format(fps) else "-")
+        StatChip(label = "Precisión", value = if (precision.isFinite()) "%.1f%%".format(precision * 100) else "-")
+    }
+}
 
-            // Punto de referencia: centro inferior de la cámara
-            val refPoint = Offset(overlayW / 2f, overlayH)
+@Composable
+private fun StatChip(label: String, value: String) {
+    Surface(
+        color = Color(0x2222AAFF),
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Text("$label:", color = Color.White, fontSize = 12.sp)
+            Spacer(Modifier.width(6.dp))
+            Text(value, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
 
-            // --- Detecciones ---
-            orientation.forEach { res ->
-                val left = offsetX + res.box.left * scale
-                val top = offsetY + res.box.top * scale
-                val w = res.box.width() * scale
-                val h = res.box.height() * scale
+@Composable
+private fun DetectionOverlay(
+    detections: List<Detection>,
+    orientation: List<OrientationResult>,
+    best: OrientationResult?
+) {
+    Box(Modifier.fillMaxSize()) {
+        Canvas(Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
 
-                // Centro del bounding box detectado
-                val objCenter = Offset(left + w / 2f, top + h / 2f)
-
-                // Dibujar rectángulo del objeto
+            detections.forEach { det ->
+                val l = det.box.left * w
+                val t = det.box.top * h
+                val r = det.box.right * w
+                val b = det.box.bottom * h
+                val rectColor = if (best != null && det.box == best.box) Color(0xFF00E676) else Color(0x66FFFFFF)
                 drawRect(
-                    color = Color(0xFF8A2BE2),
-                    topLeft = Offset(left, top),
-                    size = Size(w, h),
-                    style = Stroke(width = 4f)
-                )
-
-                // --- Línea desde punto referencial hasta el objeto ---
-                drawLine(
-                    color = Color.Cyan,
-                    start = refPoint,
-                    end = objCenter,
-                    strokeWidth = 3f
-                )
-
-                // --- Texto con distancia estimada ---
-                val distanceText = if (res.distanceMeters != null)
-                    "${"%.1f".format(res.distanceMeters)} m"
-                else
-                    res.distance.name.lowercase()
-
-                drawContext.canvas.nativeCanvas.drawText(
-                    distanceText,
-                    objCenter.x,
-                    objCenter.y - h / 2f - 10f,
-                    android.graphics.Paint().apply {
-                        color = android.graphics.Color.CYAN
-                        textSize = 36f
-                        isFakeBoldText = true
-                    }
+                    color = rectColor,
+                    topLeft = Offset(l, t),
+                    size = Size(width = (r - l), height = (b - t)),
+                    style = Stroke(width = 3f)
                 )
             }
-
-            // --- Punto de referencia (marcador visual) ---
-            drawCircle(
-                color = Color.Red,
-                radius = 10f,
-                center = refPoint
-            )
         }
 
-        // Etiquetas orientadas
+        // Etiquetas orientadas (texto)
         orientation.forEach { res ->
-            val lxDp = with(density) { (offsetX + res.box.left * scale + 8f).toDp() }
-            val lyDp = with(density) { (offsetY + res.box.top * scale + 8f).toDp() }
-
             val posTxt = when (res.position) {
                 Position.IZQUIERDA -> "Izq"
                 Position.CENTRO_IZQUIERDA -> "C-Izq"
@@ -327,22 +358,32 @@ private fun DetectionsOverlay(
                 Position.CENTRO_DERECHA -> "C-Der"
                 Position.DERECHA -> "Der"
             }
-            val distTxt = when (res.distance) {
+            val distTxt = res.distanceMeters?.let { m ->
+                when {
+                    m < 1.0f -> "muy cerca (${String.format("%.1f", m)}m)"
+                    m < 2.0f -> "cerca (${String.format("%.1f", m)}m)"
+                    m < 4.0f -> "medio (${String.format("%.1f", m)}m)"
+                    else -> "lejos (${String.format("%.0f", m)}m)"
+                }
+            } ?: when (res.distance) {
                 Distance.CERCA -> "cerca"
                 Distance.MEDIO -> "medio"
                 Distance.LEJOS -> "lejos"
             }
+
             val text = "${res.label} ${(res.confidence * 100).toInt()}% • $posTxt • $distTxt"
 
-            Text(
-                text = text,
-                color = Color.White,
-                fontSize = 14.sp,
+            Box(
                 modifier = Modifier
-                    .offset(x = lxDp, y = lyDp)
+                    .offset(
+                        x = (res.box.left * 16f).dp,
+                        y = (res.box.top * 16f).dp
+                    )
                     .background(Color(0x99000000), shape = RoundedCornerShape(6.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp)
-            )
+            ) {
+                Text(text = text, color = Color.White, fontSize = 12.sp)
+            }
         }
     }
 }

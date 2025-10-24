@@ -1,9 +1,9 @@
 package com.example.aimesdes
 
-
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
-import androidx.compose.ui.text.input.KeyboardType
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -16,25 +16,33 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -47,15 +55,9 @@ import com.example.aimesdes.ui.PerformanceTestScreen
 import com.example.aimesdes.vision.VisionModule
 import com.example.aimesdes.AsistenteViewModel.*
 import java.util.Locale
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.TextFieldColors
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.text.KeyboardOptions
 
 /* ------------------- Datos comandos / estado UI ------------------- */
@@ -70,14 +72,6 @@ data class Comando(
 
 data class ComandosWrapper(val comandos: List<Comando>)
 
-data class AsistenteUIState(
-    val isListening: Boolean = false,
-    val recognizedText: String = "Toca el micrófono para hablar",
-    val assistantResponse: String = "",
-    val micRmsDb: Float = 0f
-)
-
-
 /* ------------------- Main Activity con navegación ------------------- */
 
 class MainActivity : ComponentActivity() {
@@ -87,16 +81,51 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
+            val context = LocalContext.current
             val visionModule = remember { VisionModule() }
             val nav = rememberNavController()
-            val navToCam by asistenteViewModel.navigateToCamera
 
+            // --- Permisos (mic + cámara) ---
+            var hasMicPerm by remember {
+                mutableStateOf(
+                    ContextCompat.checkSelfPermission(
+                        context, Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                )
+            }
+            var hasCamPerm by remember {
+                mutableStateOf(
+                    ContextCompat.checkSelfPermission(
+                        context, Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                )
+            }
+
+            val multiPermLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestMultiplePermissions()
+            ) { result ->
+                val mic = result[Manifest.permission.RECORD_AUDIO] == true
+                val cam = result[Manifest.permission.CAMERA] == true
+                hasMicPerm = mic
+                hasCamPerm = cam
+                if (!mic) Toast.makeText(context, "Permiso de micrófono denegado", Toast.LENGTH_SHORT).show()
+                if (!cam) Toast.makeText(context, "Permiso de cámara denegado", Toast.LENGTH_SHORT).show()
+            }
+
+            // Efecto de navegación disparado por el VM (cuando entiende "abrir cámara", etc.)
+            val navToCam by asistenteViewModel.navigateToCamera
             LaunchedEffect(navToCam) {
                 if (navToCam) {
+                    // Apaga mic principal antes de entrar al Test (evita conflictos)
                     asistenteViewModel.stopListening()
-                    asistenteViewModel.setVisionMode(true)   // << activar modo visión
+                    asistenteViewModel.setVisionMode(true)
                     asistenteViewModel.navigateToCamera.value = false
-                    nav.navigate("performance_test")
+
+                    if (!hasCamPerm) {
+                        multiPermLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+                    } else {
+                        nav.navigate("performance_test")
+                    }
                 }
             }
 
@@ -108,9 +137,25 @@ class MainActivity : ComponentActivity() {
                             onAlert = { nav.navigate("alert") },
                             onSettings = { nav.navigate("settings") },
                             onHelp = { nav.navigate("help") },
-                            onMicRequested = { asistenteViewModel.startListening() },
-                            onCamera = { nav.navigate("performance_test") },
-                            asistenteViewModel = asistenteViewModel
+                            onMicRequested = {
+                                if (!hasMicPerm) {
+                                    multiPermLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+                                } else {
+                                    asistenteViewModel.startListening()
+                                }
+                            },
+                            onCamera = {
+                                // Detén el mic principal ANTES de entrar al test
+                                asistenteViewModel.stopListening()
+                                asistenteViewModel.setVisionMode(true)
+                                if (!hasCamPerm) {
+                                    multiPermLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+                                } else {
+                                    nav.navigate("performance_test")
+                                }
+                            },
+                            asistenteViewModel = asistenteViewModel,
+                            hasMicPerm = hasMicPerm
                         )
                     }
 
@@ -118,11 +163,11 @@ class MainActivity : ComponentActivity() {
                     composable("alert") {
                         AlertScreen(
                             onBack = { nav.popBackStack() },
-                            phone = "56912345678",                 // reemplaza por tu estado si ya lo tienes
+                            phone = "56912345678",
                             message = "Necesito ayuda.",
                             option = "opt2",
-                            onDialContact = { /* llama a tu dial() */ },
-                            onDialServices = { /* dial("133") */ },
+                            onDialContact = { /* dial a contacto */ },
+                            onDialServices = { /* dial 133 */ },
                             onSendSms = { /* sms(phone, message) */ },
                             onQuickSms = { quick -> /* sms(phone, quick) */ }
                         )
@@ -138,11 +183,9 @@ class MainActivity : ComponentActivity() {
                             initialLargeText = true,
                             initialTts = true,
                             initialVibration = true,
-                            onSave = { phone, msg, opt, big, tts, vib ->
-                                // guarda en tu estado si corresponde
-                            },
-                            onTestDial = { /* dial("133") */ },
-                            onTestSms = { phone, msg -> /* sms(phone, msg) */ }
+                            onSave = { _, _, _, _, _, _ -> },
+                            onTestDial = { /* dial 133 */ },
+                            onTestSms = { _, _ -> /* sms(...) */ }
                         )
                     }
 
@@ -151,21 +194,29 @@ class MainActivity : ComponentActivity() {
                         HelpScreen(onBack = { nav.popBackStack() })
                     }
 
-                    // CÁMARA
+                    // CÁMARA / TEST
                     composable("performance_test") {
                         PerformanceTestScreen(
                             visionModule = visionModule,
                             asistenteViewModel = asistenteViewModel,
-                            onStopped = {
-                                asistenteViewModel.setVisionMode(false)
-                                nav.popBackStack()
-                            }
+                            lifecycleOwner = this@MainActivity
                         )
                     }
                 }
-
             }
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Si la app pierde foco, apaga el mic principal para evitar bugeos
+        asistenteViewModel.stopListening()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Limpieza final
+        asistenteViewModel.stopListening()
     }
 }
 
@@ -178,35 +229,14 @@ fun HomeScreen(
     onHelp: () -> Unit,
     onMicRequested: () -> Unit,
     onCamera: () -> Unit,
-    asistenteViewModel: AsistenteViewModel
+    asistenteViewModel: AsistenteViewModel,
+    hasMicPerm: Boolean
 ) {
     val bg = Color(0xFF0B0B0B)
     val micYellow = Color(0xFFFFD54F)
     val camWhite = Color.White
     val pillRed = Color(0xFFC62828)
     val context = LocalContext.current
-
-    // Permiso micrófono
-    var hasMicPerm by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(
-                context, android.Manifest.permission.RECORD_AUDIO
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        )
-    }
-
-    val micPermLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasMicPerm = granted
-        if (granted) onMicRequested()
-        else Toast.makeText(context, "Permiso de micrófono denegado", Toast.LENGTH_SHORT).show()
-    }
-
-    fun handleMicClick() {
-        if (hasMicPerm) onMicRequested()
-        else micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-    }
 
     val ui by asistenteViewModel.uiState
 
@@ -228,15 +258,28 @@ fun HomeScreen(
                 .height(90.dp)) { onAlert() }
             Spacer(Modifier.height(40.dp))
 
-            CircleAction(circleSize, micYellow, Icons.Filled.Mic, "Micrófono", Color.Black) {
-                handleMicClick()
+            // Mic principal (Home)
+            CircleAction(
+                size = circleSize,
+                color = micYellow,
+                icon = Icons.Filled.Mic,
+                label = "Micrófono",
+                labelColor = Color.Black
+            ) {
+                if (hasMicPerm) onMicRequested()
+                else Toast.makeText(context, "Otorga permiso de micrófono", Toast.LENGTH_SHORT).show()
             }
 
             Spacer(Modifier.height(40.dp))
 
-            CircleAction(circleSize,camWhite,Icons.Filled.CameraAlt,"capturar",Color.Black) {
-                onCamera()
-            }
+            // Entra al Test (la pantalla administra su propio micrófono)
+            CircleAction(
+                size = circleSize,
+                color = camWhite,
+                icon = Icons.Filled.CameraAlt,
+                label = "Capturar",
+                labelColor = Color.Black
+            ) { onCamera() }
 
             Spacer(Modifier.weight(1f))
             BottomBar(onSettings, onHelp, 40.dp)
@@ -261,11 +304,12 @@ fun HomeScreen(
         )
     }
 }
+
 @Composable
 fun CircleAction(
     size: Dp,
     color: Color,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     label: String,
     labelColor: Color,
     onClick: () -> Unit
@@ -388,13 +432,8 @@ fun AlertScreen(
         ) {
 
             when (option) {
-
-                /* ---------------- Opción 1 ----------------
-                   – Pastilla con NOMBRE del contacto arriba
-                   – Mensaje “Necesito ayuda [ubicación]” y estado “Enviando…”
-                */
                 "opt1" -> {
-                    BigPill(text = "CONTACTO", onClick = onDialContact) // si conoces el nombre, colócalo aquí
+                    BigPill(text = "CONTACTO", onClick = onDialContact)
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "“Necesito ayuda”  [ubicación]",
@@ -406,35 +445,22 @@ fun AlertScreen(
                     Spacer(Modifier.height(10.dp))
                     BigHintCard("Mensaje configurado:", message)
                 }
-
-                /* ---------------- Opción 2 ----------------
-                   – Dos pastillas enormes: CONTACTO y SERVICIOS
-                */
                 "opt2" -> {
                     BigPill(text = "CONTACTO", onClick = onDialContact)
                     BigPill(text = "SERVICIOS (133)", onClick = onDialServices)
                     BigHintCard("Mensaje configurado:", message)
                 }
-
-                /* ---------------- Opción 3 ----------------
-                   – Lista de mensajes grandes (como tarjetas) + Agregar (+) placeholder
-                */
                 "opt3" -> {
                     Text("Mensajes:", color = txt, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                     BigMsgCard("Necesito orientación para llegar a mi destino.") { onQuickSms(it) }
                     BigMsgCard("Estoy en un lugar que no reconozco.") { onQuickSms(it) }
                     BigMsgAdd(onClick = { /* TODO: agregar mensaje personalizado */ })
                 }
-
-                /* ---------------- Opción 4 ----------------
-                   – CONTACTO / SERVICIOS + botón MENSAJE aparte (como tu diseño)
-                */
                 "opt4" -> {
                     BigPill(text = "CONTACTO", onClick = onDialContact)
                     BigPill(text = "SERVICIOS (133)", onClick = onDialServices)
                     BigBoxButton(text = "MENSAJE", onClick = onSendSms)
                 }
-
                 else -> {
                     Text("Selecciona un diseño en Configuración.", color = txt)
                 }
@@ -528,7 +554,7 @@ fun SettingsScreen(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     colors = darkFieldColors(),
-                    textStyle = LocalTextStyle.current.copy(color = txt),
+                    textStyle = TextStyle(color = txt),
                     modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
@@ -538,7 +564,7 @@ fun SettingsScreen(
                     singleLine = false,
                     minLines = 2,
                     colors = darkFieldColors(),
-                    textStyle = LocalTextStyle.current.copy(color = txt),
+                    textStyle = TextStyle(color = txt),
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -654,7 +680,6 @@ fun HelpScreen(onBack: () -> Unit) {
                 .background(bg)
                 .padding(horizontal = 20.dp, vertical = 16.dp)
         ) {
-            // Texto scrollable ocupa el espacio disponible
             Column(
                 modifier = Modifier
                     .weight(1f)
@@ -670,7 +695,6 @@ fun HelpScreen(onBack: () -> Unit) {
 
             Spacer(Modifier.height(16.dp))
 
-            // Botón grande fijo abajo
             if (!isSpeaking) {
                 Button(
                     onClick = { speakAll() },
@@ -707,7 +731,7 @@ private fun BigPill(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(88.dp)                     // alto grande
+            .height(88.dp)
             .clip(RoundedCornerShape(50))
             .background(bg)
             .clickable(onClick = onClick)
@@ -728,7 +752,7 @@ private fun BigBoxButton(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(96.dp)                     // caja muy grande
+            .height(96.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(bg)
             .clickable(onClick = onClick)
@@ -868,8 +892,11 @@ private fun PillButton(
     }
 }
 
+/* ====== Nota: versión alternativa del helper de círculo ======
+   Renombrada para evitar colisión con la función principal.
+   (La dejo por si la necesitas más adelante.) */
 @Composable
-private fun CircleAction(
+private fun CircleActionLarge(
     size: Dp,
     containerColor: Color,
     icon: @Composable () -> Unit,
