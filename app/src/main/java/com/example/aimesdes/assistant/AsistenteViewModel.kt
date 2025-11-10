@@ -34,7 +34,8 @@ data class AsistenteUIState(
     val recognizedText: String = "Toca el micrófono para hablar",
     val assistantResponse: String = "",
     val micRmsDb: Float = 0f,
-    val destinoEstacion: String? = null // último destino detectado
+    val estacionActual: String? = null,     // <--- NUEVO
+    val estacionDestino: String? = null     // <--- NUEVO
 )
 
 // ----------------- ViewModel -----------------
@@ -234,8 +235,9 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
             "activar_guiado" -> "Iniciando guía en modo ${parametros.modo ?: "predeterminado"}."
             "destino_estacion" -> {
                 val est = parametros.estacion ?: "el destino"
-                // publicamos el destino para que lo lean las pantallas
-                uiState.value = uiState.value.copy(destinoEstacion = est)
+                // publica destino (PerformanceTestScreen lo escuchará)
+                uiState.value = uiState.value.copy(estacionDestino = est)
+                // respuesta por TTS como antes
                 if (ultimaEstacionConfirmada == est) {
                     "Reanudando guía hacia $est."
                 } else {
@@ -312,4 +314,12 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
     fun say(texto: String) {
         reproducirTexto(texto)
     }
+
+    fun setEstacionActual(nombre: String?) {
+        uiState.value = uiState.value.copy(estacionActual = nombre)
+    }
+    fun clearRuta() {
+        uiState.value = uiState.value.copy(estacionDestino = null)
+    }
+
 }
