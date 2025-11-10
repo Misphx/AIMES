@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.system.measureTimeMillis
 
 data class Detection(
-    val box: RectF,
+    val box: RectF,     // Coordenadas en espacio del modelo (0..640)
     val score: Float,
     val label: String = ""
 )
@@ -56,7 +56,7 @@ class VisionModule {
         }
     }
 
-    /** Overload seguro **/
+    /** Overload seguro: requiere un LifecycleOwner explícito **/
     @SuppressLint("UnsafeOptInUsageError")
     fun startCamera(
         context: Context,
@@ -159,6 +159,7 @@ class VisionModule {
         val inputSize = 640
         val resized = android.graphics.Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
 
+        // --- Preprocesamiento según tipo de entrada ---
         val inType = tfl.getInputTensor(0).dataType().toString() // FLOAT32 o UINT8
         val inputBuffer: ByteBuffer = when (inType) {
             "FLOAT32" -> {
@@ -193,9 +194,10 @@ class VisionModule {
             }
         }
 
+        // --- Descubre salida real ---
         val outTensor = tfl.getOutputTensor(0)
-        val outShape = outTensor.shape()
-        val outType = outTensor.dataType().toString()
+        val outShape = outTensor.shape()           // p.ej. [1, 17, 8400] o [1, 8400, 85]
+        val outType = outTensor.dataType().toString() // normalmente FLOAT32
         val outBytes = outTensor.numBytes()
 
         val outBuffer = ByteBuffer.allocateDirect(outBytes).order(ByteOrder.nativeOrder())
@@ -203,10 +205,13 @@ class VisionModule {
         val outputs = hashMapOf<Int, Any>(0 to outBuffer)
 
         val elapsed = kotlin.system.measureTimeMillis {
+            // usar API robusta que acepta ByteBuffer directo de salida
             tfl.runForMultipleInputsOutputs(inputs, outputs)
         }
         Log.d("AIMES", "Inferencia shape=${outShape.contentToString()} en ${elapsed}ms; outType=$outType")
 
+        // --- Parseo genérico del outBuffer como float (si es UINT8/F16, TFLite lo castea a float al leer) ---
+        // Nota: si outType fuera UINT8, podemos leer bytes y convertir; normalmente es FLOAT32.
         outBuffer.rewind()
         val floats = FloatArray(outBytes / 4)
         outBuffer.asFloatBuffer().get(floats)
@@ -219,6 +224,8 @@ class VisionModule {
         val a = outShape[1] // puede ser canales o boxes
         val n = outShape[2] // puede ser boxes o canales
 
+        // Heurística: si a es 84/85/17 => a = canales; n = boxes (tu caso: [1,17,8400])
+        // si n es 84/85/17 => n = canales; a = boxes ([1,8400,85])
         val channelsFirst = (a in listOf(17, 84, 85)) && (n in listOf(8400, 25200))
         val boxesFirst    = (a in listOf(8400, 25200)) && (n in listOf(17, 84, 85))
 
@@ -245,6 +252,11 @@ class VisionModule {
         when {
             channelsFirst -> {
                 val C = a; val K = n
+                // outBuffer ya lo convertimos a 'floats'
+                // Layout linealizado [1, C, K] => index = c*K + k
+                // Para cada caja k armamos el vector de longitud C y probamos ambos esquemas:
+                //   - sin obj:  vec = [cx,cy,w,h, cls0..]
+                //   - con obj: vec = [cx,cy,w,h,obj, cls0..]
                 // Elegimos el que da mayor confianza.
                 for (k in 0 until K) {
                     // Construir vector de canales para la caja k
@@ -309,6 +321,7 @@ class VisionModule {
             }
             boxesFirst -> {
                 val K = a; val C = n
+                // buffers: [1, K, C] linealizado → index = (k*C + c)
                 val hasObj = when {
                     labels.isNotEmpty() && C - 5 == labels.size -> true
                     labels.isNotEmpty() && C - 4 == labels.size -> false

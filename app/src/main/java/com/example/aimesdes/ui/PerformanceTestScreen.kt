@@ -30,9 +30,16 @@ import com.example.aimesdes.orientation.Distance
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-
-// importa tu ViewModel (está declarado en el mismo package com.example.aimesdes)
-import com.example.aimesdes.AsistenteViewModel
+import com.example.aimesdes.assistant.AsistenteViewModel
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -41,6 +48,12 @@ fun PerformanceTestScreen(
     asistenteViewModel: AsistenteViewModel,   // <<--- ViewModel para TTS
     modifier: Modifier = Modifier
 ) {
+    LaunchedEffect(Unit) {
+        try {
+            asistenteViewModel.setContinuousListening(false)
+            asistenteViewModel.stopListening()
+        } catch (_: Exception) {}
+    }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -58,11 +71,24 @@ fun PerformanceTestScreen(
     var orientResults by remember { mutableStateOf<List<OrientationResult>>(emptyList()) }
     var bestOrient by remember { mutableStateOf<OrientationResult?>(null) }
 
+    var lastSpoken by remember { mutableStateOf("") }
+    var lastSpeakTimeMs by remember { mutableStateOf(0L) }
+
     // Permiso de cámara
     val hasCameraPermInit = ContextCompat.checkSelfPermission(
         context, android.Manifest.permission.CAMERA
     ) == android.content.pm.PackageManager.PERMISSION_GRANTED
     var hasCameraPerm by remember { mutableStateOf(hasCameraPermInit) }
+
+    val voice = asistenteViewModel.uiState.value
+    val ctx = LocalContext.current
+
+    val micPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) asistenteViewModel.startListening()
+        else Toast.makeText(ctx, "Permiso de micrófono denegado", Toast.LENGTH_SHORT).show()
+    }
 
     val cameraPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -85,11 +111,22 @@ fun PerformanceTestScreen(
                     orientResults = orientation.analyze(dets, w, h)
                     bestOrient = orientation.selectBest(orientResults)
 
-                    // TTS inmediato con anti-flood en el ViewModel
-                    bestOrient?.let { asistenteViewModel.speakOrientation(it) }
                 }
                 isRunning = true
             }
+        }
+    }
+
+    fun handleMicClick() {
+        val hasMic = ContextCompat.checkSelfPermission(
+            ctx, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasMic) {
+            micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            if (voice.isListening) asistenteViewModel.stopListening()
+            else asistenteViewModel.startListening()
         }
     }
 
@@ -163,56 +200,94 @@ fun PerformanceTestScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                Button(
-                    onClick = {
-                        if (isRunning) {
-                            visionModule.stopCamera()
-                            isRunning = false
-                        } else {
-                            if (!hasCameraPerm) {
-                                cameraPermLauncher.launch(android.Manifest.permission.CAMERA)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Botón existente de cámara (lo dejas como está)
+                    Button(
+                        onClick = {
+                            if (isRunning) {
+                                visionModule.stopCamera()
+                                isRunning = false
                             } else {
-                                val pv = previewRef
-                                if (pv != null) {
-                                    visionModule.startCamera(
-                                        context = context,
-                                        lifecycleOwner = lifecycleOwner,
-                                        previewView = pv
-                                    ) { dets, newFps, newPrecision ->
-                                        detections = dets
-                                        fps = newFps
-                                        precision = newPrecision
-
-                                        val w = previewRef?.width ?: 0
-                                        val h = previewRef?.height ?: 0
-                                        orientResults = orientation.analyze(dets, w, h)
-                                        bestOrient = orientation.selectBest(orientResults)
-
-                                        // TTS en botón start
-                                        bestOrient?.let { asistenteViewModel.speakOrientation(it) }
+                                if (!hasCameraPerm) {
+                                    cameraPermLauncher.launch(android.Manifest.permission.CAMERA)
+                                } else {
+                                    val pv = previewRef
+                                    if (pv != null) {
+                                        visionModule.startCamera(
+                                            context = context,
+                                            lifecycleOwner = lifecycleOwner,
+                                            previewView = pv
+                                        ) { dets, newFps, newPrecision ->
+                                            detections = dets
+                                            fps = newFps
+                                            precision = newPrecision
+                                            // usa 640x640 para orientar en el marco del modelo
+                                            orientResults = orientation.analyze(dets, 640, 640)
+                                            bestOrient = orientation.selectBest(orientResults)
+                                        }
+                                        isRunning = true
                                     }
-                                    isRunning = true
                                 }
                             }
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isRunning) Color.Red else Color(0xFF4CAF50)
-                    ),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isRunning) Color.Red else Color(0xFF4CAF50)
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text(
+                            text = if (isRunning) "Detener" else "Iniciar prueba",
+                            color = Color.White,
+                            fontSize = 16.sp
+                        )
+                    }
+
+                    Spacer(Modifier.width(12.dp))
+
+                    // ⏺️ Botón de micrófono (nuevo)
+                    FilledIconButton(onClick = { handleMicClick() }) {
+                        Icon(
+                            imageVector = if (voice.isListening) Icons.Filled.Stop else Icons.Filled.Mic,
+                            contentDescription = if (voice.isListening) "Detener micrófono" else "Activar micrófono"
+                        )
+                    }
+
+                    Spacer(Modifier.width(8.dp))
+
                     Text(
-                        text = if (isRunning) "Detener" else "Iniciar prueba",
+                        text = if (voice.isListening) "Escuchando…" else "Mic apagado",
                         color = Color.White,
-                        fontSize = 16.sp
+                        fontSize = 14.sp
                     )
                 }
             }
         }
+
     }
+    // TTS: anunciar la mejor orientación sin spamear
+    LaunchedEffect(bestOrient) {
+        val best = bestOrient ?: return@LaunchedEffect
+        if (best.confidence < 0.90f) return@LaunchedEffect  // umbral de confianza
+
+        val msg = orientation.formatTts(best)
+        val now = System.currentTimeMillis()
+        val changed = msg != lastSpoken
+        val enoughTime = now - lastSpeakTimeMs >= 4000      // 3s mínimo entre mensajes
+
+        if (changed && enoughTime) {
+            asistenteViewModel.say(msg)                     // <- usa el wrapper público
+            lastSpoken = msg
+            lastSpeakTimeMs = now
+        }
+    }
+
+
 }
 
 @Composable
+
 private fun DetectionsOverlay(
     orientation: List<OrientationResult>,
     modelInputSize: Int = 640

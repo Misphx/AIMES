@@ -1,10 +1,11 @@
-package com.example.aimesdes.vision
+package com.example.aimesdes.orientation
+
 
 import android.graphics.RectF
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-
+import com.example.aimesdes.vision.Detection
 enum class Position {
     IZQUIERDA, CENTRO_IZQUIERDA, CENTRO, CENTRO_DERECHA, DERECHA
 }
@@ -102,6 +103,6 @@ class OrientationModule(
             Distance.LEJOS -> "lejos"
         }
         val confPct = (result.confidence * 100).toInt()
-        return "$nombre $pos, $dist, $confPct por ciento."
+        return "$nombre $pos, $dist, $confPct porciento."
     }
 }
