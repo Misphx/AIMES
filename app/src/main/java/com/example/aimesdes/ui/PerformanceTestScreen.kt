@@ -1,11 +1,17 @@
 package com.example.aimesdes.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,39 +27,32 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.example.aimesdes.vision.Detection
-import com.example.aimesdes.vision.VisionModule
-import com.example.aimesdes.orientation.OrientationModule
-import com.example.aimesdes.orientation.OrientationResult
-import com.example.aimesdes.orientation.Position
-import com.example.aimesdes.orientation.Distance
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.example.aimesdes.assistant.AsistenteViewModel
-import android.Manifest
-import android.content.pm.PackageManager
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.Icon
+import com.example.aimesdes.orientation.Distance
+import com.example.aimesdes.orientation.OrientationModule
+import com.example.aimesdes.orientation.OrientationResult
+import com.example.aimesdes.orientation.Position
+import com.example.aimesdes.vision.Detection
+import com.example.aimesdes.vision.VisionModule
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PerformanceTestScreen(
     visionModule: VisionModule,
-    asistenteViewModel: AsistenteViewModel,   // <<--- ViewModel para TTS
+    asistenteViewModel: AsistenteViewModel,
     modifier: Modifier = Modifier
 ) {
+    // Asegura mic apagado al entrar
     LaunchedEffect(Unit) {
         try {
             asistenteViewModel.setContinuousListening(false)
             asistenteViewModel.stopListening()
         } catch (_: Exception) {}
     }
+
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -66,28 +65,30 @@ fun PerformanceTestScreen(
     // PreviewView para CameraX
     var previewRef by remember { mutableStateOf<PreviewView?>(null) }
 
-    // Orientación
-    val orientation = remember { OrientationModule(targetLabel = null) } // p.ej. "entrada"
+    // Orientación + TTS
+    val orientation = remember { OrientationModule(targetLabel = null) }
+    LaunchedEffect(Unit) {
+        orientation.setSpeaker { asistenteViewModel.say(it) }
+    }
+
     var orientResults by remember { mutableStateOf<List<OrientationResult>>(emptyList()) }
     var bestOrient by remember { mutableStateOf<OrientationResult?>(null) }
-
     var lastSpoken by remember { mutableStateOf("") }
     var lastSpeakTimeMs by remember { mutableStateOf(0L) }
 
-    // Permiso de cámara
-    val hasCameraPermInit = ContextCompat.checkSelfPermission(
-        context, android.Manifest.permission.CAMERA
-    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-    var hasCameraPerm by remember { mutableStateOf(hasCameraPermInit) }
-
-    val voice = asistenteViewModel.uiState.value
-    val ctx = LocalContext.current
+    // Permisos
+    var hasCameraPerm by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+                    == PackageManager.PERMISSION_GRANTED
+        )
+    }
 
     val micPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) asistenteViewModel.startListening()
-        else Toast.makeText(ctx, "Permiso de micrófono denegado", Toast.LENGTH_SHORT).show()
+        else Toast.makeText(context, "Permiso de micrófono denegado", Toast.LENGTH_SHORT).show()
     }
 
     val cameraPermLauncher = rememberLauncherForActivityResult(
@@ -95,8 +96,7 @@ fun PerformanceTestScreen(
     ) { granted ->
         hasCameraPerm = granted
         if (granted) {
-            val pv = previewRef
-            if (pv != null) {
+            previewRef?.let { pv ->
                 visionModule.startCamera(
                     context = context,
                     lifecycleOwner = lifecycleOwner,
@@ -106,20 +106,21 @@ fun PerformanceTestScreen(
                     fps = newFps
                     precision = newPrecision
 
-                    val w = previewRef?.width ?: 0
-                    val h = previewRef?.height ?: 0
-                    orientResults = orientation.analyze(dets, w, h)
+                    // Usa el espacio del modelo (640x640) para orientar de forma consistente
+                    orientResults = orientation.analyze(dets, 640, 640)
                     bestOrient = orientation.selectBest(orientResults)
-
                 }
                 isRunning = true
             }
         }
     }
 
+    // UI state del asistente: usa 'by' para recomposición
+    val voice by asistenteViewModel.uiState
+
     fun handleMicClick() {
         val hasMic = ContextCompat.checkSelfPermission(
-            ctx, Manifest.permission.RECORD_AUDIO
+            context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
 
         if (!hasMic) {
@@ -130,7 +131,7 @@ fun PerformanceTestScreen(
         }
     }
 
-    // Al salir: apagar cámara
+    // Apagar cámara al salir
     DisposableEffect(Unit) {
         onDispose { visionModule.stopCamera() }
     }
@@ -168,7 +169,7 @@ fun PerformanceTestScreen(
                 }
             )
 
-            // Overlay con cajas y labels orientados
+            // Overlay con cajas y labels (solo modo dev)
             DetectionsOverlay(
                 orientation = orientResults,
                 modelInputSize = 640
@@ -184,26 +185,17 @@ fun PerformanceTestScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 val guide = bestOrient?.let { orientation.formatTts(it) } ?: "Buscando objetivo…"
-                Text(
-                    text = guide,
-                    color = Color.White,
-                    fontSize = 14.sp
-                )
+                Text(text = guide, color = Color.White, fontSize = 14.sp)
 
                 Spacer(modifier = Modifier.height(6.dp))
-
                 Text(
                     text = "FPS: ${"%.2f".format(fps)}  |  Precisión: ${"%.1f".format(precision)}%",
-                    color = Color.White,
-                    fontSize = 14.sp
+                    color = Color.White, fontSize = 14.sp
                 )
-
                 Spacer(modifier = Modifier.height(8.dp))
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Botón existente de cámara (lo dejas como está)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Botón cámara
                     Button(
                         onClick = {
                             if (isRunning) {
@@ -211,10 +203,9 @@ fun PerformanceTestScreen(
                                 isRunning = false
                             } else {
                                 if (!hasCameraPerm) {
-                                    cameraPermLauncher.launch(android.Manifest.permission.CAMERA)
+                                    cameraPermLauncher.launch(Manifest.permission.CAMERA)
                                 } else {
-                                    val pv = previewRef
-                                    if (pv != null) {
+                                    previewRef?.let { pv ->
                                         visionModule.startCamera(
                                             context = context,
                                             lifecycleOwner = lifecycleOwner,
@@ -223,7 +214,6 @@ fun PerformanceTestScreen(
                                             detections = dets
                                             fps = newFps
                                             precision = newPrecision
-                                            // usa 640x640 para orientar en el marco del modelo
                                             orientResults = orientation.analyze(dets, 640, 640)
                                             bestOrient = orientation.selectBest(orientResults)
                                         }
@@ -239,55 +229,63 @@ fun PerformanceTestScreen(
                     ) {
                         Text(
                             text = if (isRunning) "Detener" else "Iniciar prueba",
-                            color = Color.White,
-                            fontSize = 16.sp
+                            color = Color.White, fontSize = 16.sp
                         )
                     }
 
                     Spacer(Modifier.width(12.dp))
 
-                    // ⏺️ Botón de micrófono (nuevo)
+                    // Botón micrófono
                     FilledIconButton(onClick = { handleMicClick() }) {
                         Icon(
                             imageVector = if (voice.isListening) Icons.Filled.Stop else Icons.Filled.Mic,
                             contentDescription = if (voice.isListening) "Detener micrófono" else "Activar micrófono"
                         )
                     }
-
                     Spacer(Modifier.width(8.dp))
-
                     Text(
                         text = if (voice.isListening) "Escuchando…" else "Mic apagado",
-                        color = Color.White,
-                        fontSize = 14.sp
+                        color = Color.White, fontSize = 14.sp
                     )
                 }
             }
         }
-
     }
-    // TTS: anunciar la mejor orientación sin spamear
+
+    // TTS de orientación (anti-spam)
     LaunchedEffect(bestOrient) {
         val best = bestOrient ?: return@LaunchedEffect
-        if (best.confidence < 0.90f) return@LaunchedEffect  // umbral de confianza
-
+        if (best.confidence < 0.90f) return@LaunchedEffect
         val msg = orientation.formatTts(best)
+        if (msg.isBlank()) return@LaunchedEffect
         val now = System.currentTimeMillis()
         val changed = msg != lastSpoken
-        val enoughTime = now - lastSpeakTimeMs >= 4000      // 3s mínimo entre mensajes
-
+        val enoughTime = now - lastSpeakTimeMs >= 4000
         if (changed && enoughTime) {
-            asistenteViewModel.say(msg)                     // <- usa el wrapper público
+            asistenteViewModel.say(msg)
             lastSpoken = msg
             lastSpeakTimeMs = now
         }
     }
 
+    // 🔎 OCR + validación de “Dirección a …” vs. extremo correcto
+    LaunchedEffect(orientResults, previewRef, isRunning, voice.estacionActual, voice.estacionDestino) {
+        if (!isRunning) return@LaunchedEffect
+        val pvBitmap = previewRef?.bitmap ?: return@LaunchedEffect
+        val origen = voice.estacionActual ?: return@LaunchedEffect
+        val destino = voice.estacionDestino ?: return@LaunchedEffect
 
+        // Llama al OCR embebido en OrientationModule (suspend)
+        orientation.guideWithOcr(
+            results = orientResults,
+            previewBitmap = pvBitmap,
+            origen = origen,
+            destino = destino
+        )
+    }
 }
 
 @Composable
-
 private fun DetectionsOverlay(
     orientation: List<OrientationResult>,
     modelInputSize: Int = 640

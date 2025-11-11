@@ -53,6 +53,8 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
     private var lastIntent: Intent? = null
     private var utteranceCounter = 0
 
+    private var esperandoDestino: Boolean = false
+
     private var ultimaEstacionConfirmada: String? = null
 
     init {
@@ -203,11 +205,38 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun procesarComando(texto: String) {
         val normText = normalize(texto)
-        val comandoEncontrado = comandos.find { matchesCommand(normText, it) }
 
+        // 1) Si el usuario dice “estoy en …” → fijar estación actual y preguntar destino
+        val estActual = extractDesdeEstoyEn(texto)
+        if (!estActual.isNullOrBlank()) {
+            uiState.value = uiState.value.copy(estacionActual = estActual)
+            esperandoDestino = true
+            val r = "Entendido. Estás en ${estActual}. ¿Hacia dónde te diriges?"
+            reproducirTexto(r)
+            uiState.value = uiState.value.copy(assistantResponse = r)
+            return
+        }
+
+        // 2) Si estamos esperando el destino y detectamos una estación → fijar destino y confirmar guía
+        if (esperandoDestino) {
+            val estDest = extractDestinoLibre(texto) ?: extractStationFromText(texto)
+            if (!estDest.isNullOrBlank()) {
+                uiState.value = uiState.value.copy(estacionDestino = estDest)
+                esperandoDestino = false
+                val r = "Iniciando guía hacia ${estDest}."
+                reproducirTexto(r)
+                uiState.value = uiState.value.copy(assistantResponse = r)
+                // opcional: detener escucha para evitar solaparse con TTS
+                stopListening()
+                return
+            }
+        }
+
+        // 3) Flujo original de comandos JSON (por si dijo un comando predefinido)
+        val comandoEncontrado = comandos.find { matchesCommand(normText, it) }
         if (comandoEncontrado != null) {
             if (comandoEncontrado.intencion == "destino_estacion" && comandoEncontrado.estacion.isNullOrEmpty()) {
-                val estacionExtraida = extractStationFromText(texto)
+                val estacionExtraida = extractDestinoLibre(texto) ?: extractStationFromText(texto)
                 val comandoFinal = comandoEncontrado.copy(estacion = estacionExtraida)
                 ejecutarAccion(comandoFinal.intencion, comandoFinal)
             } else {
@@ -216,17 +245,24 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        val estacionExtraida = extractStationFromText(texto)
-        if (!estacionExtraida.isNullOrEmpty()) {
-            val comandoTemporal = Comando(entrada = texto, intencion = "destino_estacion", estacion = estacionExtraida)
+        // 4) Fallback: intenta tratar como destino directo (“me dirijo a …”)
+        val estacionExtraida = extractDestinoLibre(texto) ?: extractStationFromText(texto)
+        if (!estacionExtraida.isNullOrBlank()) {
+            val comandoTemporal = Comando(
+                entrada = texto,
+                intencion = "destino_estacion",
+                estacion = estacionExtraida
+            )
             ejecutarAccion(comandoTemporal.intencion, comandoTemporal)
             return
         }
 
-        reproducirTexto("No entendí bien. Presiona de nuevo para hablar")
+        // 5) No se entendió
+        reproducirTexto("No entendí bien. ¿Hacia dónde te diriges?")
         uiState.value = uiState.value.copy(assistantResponse = "No entendí bien.")
         stopListening()
     }
+
 
     private fun ejecutarAccion(intencion: String, parametros: Comando) {
         val respuesta: String = when (intencion) {
@@ -314,6 +350,30 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
     fun say(texto: String) {
         reproducirTexto(texto)
     }
+    private fun extractDesdeEstoyEn(text: String): String? {
+        val m = Regex("estoy en ([\\p{L}0-9\\s]+)", RegexOption.IGNORE_CASE).find(text.trim())
+        return m?.groupValues?.getOrNull(1)?.trim()?.replace(Regex("[\\.,]$"), "")
+    }
+
+    private fun extractDestinoLibre(text: String): String? {
+        // Frases típicas para destino (sin “estoy en”)
+        val pats = listOf(
+            Regex("ir a (la |el )?estaci[oó]n ([\\p{L}0-9\\s]+)", RegexOption.IGNORE_CASE),
+            Regex("voy a (la |el )?estaci[oó]n ([\\p{L}0-9\\s]+)", RegexOption.IGNORE_CASE),
+            Regex("me dirijo a ([\\p{L}0-9\\s]+)", RegexOption.IGNORE_CASE),
+            Regex("quiero ir a ([\\p{L}0-9\\s]+)", RegexOption.IGNORE_CASE),
+            Regex("destino ([\\p{L}0-9\\s]+)", RegexOption.IGNORE_CASE)
+        )
+        val t = text.trim()
+        for (p in pats) {
+            val m = p.find(t)
+            if (m != null) {
+                return m.groupValues.last().trim().replace(Regex("[\\.,]$"), "")
+            }
+        }
+        return null
+    }
+
 
     fun setEstacionActual(nombre: String?) {
         uiState.value = uiState.value.copy(estacionActual = nombre)
