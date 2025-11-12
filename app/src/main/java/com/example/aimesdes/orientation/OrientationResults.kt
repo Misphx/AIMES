@@ -120,6 +120,7 @@ class OrientationModule(
         val nombre = when (raw) {
             "escalera_norm", "escalera_meca" -> "escaleras"
             "podo_circulo", "podo_linea"     -> "piso podotáctil"
+            "senales_rosas" -> "señal rosa"
             else -> if (result.label.isBlank()) "objeto" else result.label
         }
 
@@ -194,7 +195,7 @@ class OrientationModule(
         if (previewBitmap == null) return
         if (origen.isNullOrBlank() || destino.isNullOrBlank()) return
         val now = System.currentTimeMillis()
-        if (ocrBusy || now - lastTs < 1200) return
+        if (ocrBusy || now - lastTs < 5000) return
 
         // top-3 señales (en coords 640x640)
         val signals = results
