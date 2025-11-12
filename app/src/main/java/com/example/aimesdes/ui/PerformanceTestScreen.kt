@@ -61,7 +61,7 @@ fun PerformanceTestScreen(
     var fps by remember { mutableStateOf(0f) }
     var precision by remember { mutableStateOf(0f) }
     var detections by remember { mutableStateOf<List<Detection>>(emptyList()) }
-
+    var ocrText by remember { mutableStateOf("") }
     // PreviewView para CameraX
     var previewRef by remember { mutableStateOf<PreviewView?>(null) }
 
@@ -69,6 +69,7 @@ fun PerformanceTestScreen(
     val orientation = remember { OrientationModule(targetLabel = null) }
     LaunchedEffect(Unit) {
         orientation.setSpeaker { asistenteViewModel.say(it) }
+        orientation.setOcrDebugSink { msg -> ocrText = msg }
     }
 
     var orientResults by remember { mutableStateOf<List<OrientationResult>>(emptyList()) }
@@ -248,6 +249,12 @@ fun PerformanceTestScreen(
                         color = Color.White, fontSize = 14.sp
                     )
                 }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = if (ocrText.isBlank()) "OCR: …" else ocrText,
+                    color = Color.LightGray,
+                    fontSize = 12.sp
+                )
             }
         }
     }

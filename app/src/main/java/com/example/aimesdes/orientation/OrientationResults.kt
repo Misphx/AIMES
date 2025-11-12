@@ -47,6 +47,11 @@ class OrientationModule(
     // salida de voz desacoplada (inyectas asistenteViewModel.say)
     private var speaker: ((String) -> Unit)? = null
     fun setSpeaker(say: (String) -> Unit) { speaker = say }
+    // --- debug OCR sink (opcional) ---
+    private var ocrDebugSink: ((String) -> Unit)? = null
+    fun setOcrDebugSink(sink: (String) -> Unit) { ocrDebugSink = sink }
+    private fun ocrDebug(msg: String) { ocrDebugSink?.invoke(msg) }
+
 
     // anti–spam
     private var lastSpoken = ""
@@ -224,6 +229,8 @@ class OrientationModule(
             for (s in signals) {
                 val crop = cropFromPreview(previewBitmap, s.box, scale, offX, offY) ?: continue
                 val raw = Ocr.readText(crop)
+                val flat = raw.replace("\n", " ").trim()
+                ocrDebug("OCR: $flat")
                 if (raw.isBlank()) continue
 
                 val ntext = norm(raw)
@@ -257,6 +264,7 @@ class OrientationModule(
         } finally {
             ocrBusy = false
         }
+
     }
 
     private fun cropFromPreview(
@@ -293,6 +301,8 @@ class OrientationModule(
         .replace("\\p{InCombiningDiacriticalMarks}+".toRegex(), "")
         .replace("ñ","n")
         .trim()
+
+
 }
 
 // --------------- OCR embebido (privado al archivo) ---------------
