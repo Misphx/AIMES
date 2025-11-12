@@ -190,7 +190,13 @@ class OrientationModule(
     }
 
     // ------------------ OCR + validación de “Dirección a …” + navegación ------------------
-
+    private fun containsPartialStation(ocrText: String, station: String, minChars: Int = 5): Boolean {
+        val t = norm(ocrText)
+        val s = norm(station)
+        if (t.contains(s)) return true
+        val k = minChars.coerceAtMost(s.length)
+        return t.contains(s.substring(0, k)) // p.ej. "cerri" dentro de "direccion cerrilos"
+    }
     suspend fun guideWithOcr(
         results: List<OrientationResult>,
         previewBitmap: Bitmap?,
@@ -230,14 +236,10 @@ class OrientationModule(
                 val crop = cropFromPreview(previewBitmap, s.box, scale, offX, offY) ?: continue
                 val raw = Ocr.readText(crop)
                 val flat = raw.replace("\n", " ").trim()
-                ocrDebug("OCR: $flat")
+                ocrDebug(flat) // sigue mostrando el OCR crudo abajo
                 if (raw.isBlank()) continue
 
-                val ntext = norm(raw)
-                val m = Regex("direccion\\s+a\\s+([\\p{L}0-9\\s]+)").find(ntext)
-                val destinoCartelNorm = m?.groupValues?.getOrNull(1)?.let { norm(it) } ?: continue
-
-                if (destinoCartelNorm == extremoOkNorm) {
+                if (containsPartialStation(raw, extremoOk)) {
                     matchOk = true
                     matchedSignal = s
                     matchedRaw = raw
