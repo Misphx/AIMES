@@ -55,7 +55,7 @@ class OrientationModule(
     private var lastNav: NavType? = null
 
     // labels que consideramos “señales”
-    private val signalLabels = setOf("señal","senal","sign","cartel","indicador")
+    private val signalLabels = setOf("senales_amarillas","senales_azules","senales_cafes","senales_rojas","senales_rosas","senales_verdes")
 
     // estaciones (orden fijo) – usamos extremos
     private val estaciones = listOf(

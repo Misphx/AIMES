@@ -35,7 +35,9 @@ data class AsistenteUIState(
     val assistantResponse: String = "",
     val micRmsDb: Float = 0f,
     val estacionActual: String? = null,     // <--- NUEVO
-    val estacionDestino: String? = null     // <--- NUEVO
+    val estacionDestino: String? = null,     // <--- NUEVO
+    val objetoBuscado: String? = null,
+    val modoGuiado: String? = null
 )
 
 // ----------------- ViewModel -----------------
@@ -206,9 +208,8 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
     private fun procesarComando(texto: String) {
         val normText = normalize(texto)
 
-        // 1) Si el usuario dice “estoy en …” → fijar estación actual y preguntar destino
-        val estActual = extractDesdeEstoyEn(texto)
-        if (!estActual.isNullOrBlank()) {
+        // 1) “Estoy en …” → fijar origen y preguntar destino
+        extractDesdeEstoyEn(texto)?.let { estActual ->
             uiState.value = uiState.value.copy(estacionActual = estActual)
             esperandoDestino = true
             val r = "Entendido. Estás en ${estActual}. ¿Hacia dónde te diriges?"
@@ -217,7 +218,18 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        // 2) Si estamos esperando el destino y detectamos una estación → fijar destino y confirmar guía
+        // 2) Intentar comandos JSON SIEMPRE (aunque estemos esperando destino)
+        comandos.find { matchesCommand(normText, it) }?.let { cmd ->
+            if (cmd.intencion == "destino_estacion" && cmd.estacion.isNullOrEmpty()) {
+                val estJson = extractDestinoLibre(texto) ?: extractStationFromText(texto)
+                ejecutarAccion(cmd.intencion, cmd.copy(estacion = estJson))
+            } else {
+                ejecutarAccion(cmd.intencion, cmd)
+            }
+            return
+        }
+
+        // 3) Si estamos esperando destino y lo dice libremente → fijarlo
         if (esperandoDestino) {
             val estDest = extractDestinoLibre(texto) ?: extractStationFromText(texto)
             if (!estDest.isNullOrBlank()) {
@@ -226,72 +238,102 @@ class AsistenteViewModel(application: Application) : AndroidViewModel(applicatio
                 val r = "Iniciando guía hacia ${estDest}."
                 reproducirTexto(r)
                 uiState.value = uiState.value.copy(assistantResponse = r)
-                // opcional: detener escucha para evitar solaparse con TTS
                 stopListening()
                 return
             }
-        }
-
-        // 3) Flujo original de comandos JSON (por si dijo un comando predefinido)
-        val comandoEncontrado = comandos.find { matchesCommand(normText, it) }
-        if (comandoEncontrado != null) {
-            if (comandoEncontrado.intencion == "destino_estacion" && comandoEncontrado.estacion.isNullOrEmpty()) {
-                val estacionExtraida = extractDestinoLibre(texto) ?: extractStationFromText(texto)
-                val comandoFinal = comandoEncontrado.copy(estacion = estacionExtraida)
-                ejecutarAccion(comandoFinal.intencion, comandoFinal)
-            } else {
-                ejecutarAccion(comandoEncontrado.intencion, comandoEncontrado)
-            }
+            // No encontró destino, pero como ya intentamos JSON arriba,
+            // evitamos confundir al usuario con el fallback duro.
+            reproducirTexto("No te entendí bien. ¿Cuál es tu destino?")
+            uiState.value = uiState.value.copy(assistantResponse = "Esperando destino…")
             return
         }
 
-        // 4) Fallback: intenta tratar como destino directo (“me dirijo a …”)
-        val estacionExtraida = extractDestinoLibre(texto) ?: extractStationFromText(texto)
-        if (!estacionExtraida.isNullOrBlank()) {
-            val comandoTemporal = Comando(
-                entrada = texto,
-                intencion = "destino_estacion",
-                estacion = estacionExtraida
-            )
-            ejecutarAccion(comandoTemporal.intencion, comandoTemporal)
+        // 4) Fallback: intenta destino libre aunque no estemos esperando
+        extractDestinoLibre(texto)?.let { est ->
+            ejecutarAccion("destino_estacion", Comando(texto, "destino_estacion", estacion = est))
             return
         }
 
-        // 5) No se entendió
+        // 5) Fallback final
         reproducirTexto("No entendí bien. ¿Hacia dónde te diriges?")
         uiState.value = uiState.value.copy(assistantResponse = "No entendí bien.")
         stopListening()
     }
 
 
+    private fun titleCaseEs(s: String?): String {
+        if (s.isNullOrBlank()) return ""
+        return s.trim().lowercase(Locale("es","CL"))
+            .split(Regex("\\s+"))
+            .joinToString(" ") { w ->
+                w.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale("es","CL")) else it.toString() }
+            }
+    }
+
     private fun ejecutarAccion(intencion: String, parametros: Comando) {
         val respuesta: String = when (intencion) {
-            "buscar_objeto" -> "Buscando ${parametros.objeto ?: "el objeto"}. Por favor, espere."
-            "ubicar" -> "Usted está en ${parametros.objeto ?: "un lugar desconocido"}."
-            "activar_guiado" -> "Iniciando guía en modo ${parametros.modo ?: "predeterminado"}."
+
+            // -------- Buscar objeto (ascensor, salida, etc.) ----------
+            "buscar_objeto" -> {
+                val obj = parametros.objeto ?: "el objeto"
+                // Publica el objetivo en el estado (PerformanceTestScreen podría reaccionar)
+                uiState.value = uiState.value.copy(objetoBuscado = obj)
+                "Buscando $obj. Por favor, espere."
+            }
+
+            // -------- Ubicar (ej. “estoy en los leones”) ----------
+            "ubicar" -> {
+                val lugar = parametros.objeto ?: "un lugar desconocido"
+                val pretty = titleCaseEs(lugar)
+                // Fija estación actual y pide destino
+                uiState.value = uiState.value.copy(estacionActual = pretty)
+                esperandoDestino = true
+                "Entendido. Estás en $pretty. ¿Hacia dónde te diriges?"
+            }
+
+            // -------- Activar guiado ----------
+            "activar_guiado" -> {
+                val modo = parametros.modo ?: "predeterminado"
+                uiState.value = uiState.value.copy(modoGuiado = modo)
+                "Iniciando guía en modo $modo."
+            }
+
+            // -------- Destino estación ----------
             "destino_estacion" -> {
                 val est = parametros.estacion ?: "el destino"
-                // publica destino (PerformanceTestScreen lo escuchará)
-                uiState.value = uiState.value.copy(estacionDestino = est)
-                // respuesta por TTS como antes
-                if (ultimaEstacionConfirmada == est) {
-                    "Reanudando guía hacia $est."
+                val pretty = titleCaseEs(est)
+                // publica destino (PerformanceTestScreen lo usará con OCR)
+                uiState.value = uiState.value.copy(estacionDestino = pretty)
+                esperandoDestino = false
+                if (ultimaEstacionConfirmada == pretty) {
+                    "Reanudando guía hacia $pretty."
                 } else {
-                    ultimaEstacionConfirmada = est
+                    ultimaEstacionConfirmada = pretty
                     stopListening()
-                    "Iniciando guía hacia $est."
+                    "Iniciando guía hacia $pretty."
                 }
             }
+
+            // -------- Confirmar / Cancelar / Modificar / Repetir / Estado entorno ----------
             "confirmacion" -> "Comando confirmado."
-            "cancelar" -> "Operación cancelada."
-            "modificar" -> "¿Qué deseas modificar?"
-            "repetir" -> "Repitiendo última acción..."
+            "cancelar"     -> {
+                // limpia objetivo/destino si quieres
+                uiState.value = uiState.value.copy(objetoBuscado = null)
+                "Operación cancelada."
+            }
+            "modificar"    -> "¿Qué deseas modificar?"
+            "repetir"      -> {
+                val last = uiState.value.assistantResponse
+                if (last.isBlank()) "No tengo una acción anterior para repetir." else "Repitiendo: $last"
+            }
             "estado_entorno" -> "Mostrando información de entorno..."
             else -> "Intención no reconocida."
         }
+
         reproducirTexto(respuesta)
         uiState.value = uiState.value.copy(assistantResponse = respuesta)
     }
+
 
     private fun reproducirTexto(texto: String) {
         try {
